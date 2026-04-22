@@ -527,7 +527,7 @@ async function analyzeTx(rawHex, opts = {}) {
 // Deteksi R-reuse lintas signature
 // ============================================================
 async function detectReuse(sigs, opts = {}) {
-  sep("Deteksi R-reuse");
+  sep(opts.crossAddressOnly ? "Deteksi R-reuse LINTAS ADDRESS" : "Deteksi R-reuse");
   const hitsFile = opts.hitsFile || "hits.txt";
   const groups = new Map();
   for (const s of sigs) {
@@ -540,6 +540,10 @@ async function detectReuse(sigs, opts = {}) {
   const recovered = [];
   for (const [r, list] of groups) {
     if (list.length < 2) continue;
+    if (opts.crossAddressOnly) {
+      const addrs = new Set(list.map((s) => s.address).filter(Boolean));
+      if (addrs.size < 2) continue;
+    }
     found = true;
     console.log(c(C.red, `\n!! R berulang ditemukan pada R = ${r}`));
     console.log("   Tanda tangan terkait:");
@@ -1141,6 +1145,7 @@ async function batchAddresses(filePath, opts = {}) {
   console.log("Hits file  :", opts.hitsFile || CONFIG.hitsFile);
 
   const summary = [];
+  const pool = [];
   const startAll = Date.now();
   for (let i = 0; i < addresses.length; i++) {
     const addr = addresses[i];
@@ -1148,6 +1153,11 @@ async function batchAddresses(filePath, opts = {}) {
     try {
       const sigs = await analyzeAddress(addr, opts);
       summary.push({ addr, ok: true, sigCount: sigs ? sigs.length : 0 });
+      if (sigs && sigs.length) {
+        for (const s of sigs) {
+          pool.push({ ...s, address: s.address || addr });
+        }
+      }
     } catch (e) {
       console.log(c(C.red, "Gagal scan " + addr + ": " + e.message));
       summary.push({ addr, ok: false, error: e.message });
@@ -1163,7 +1173,20 @@ async function batchAddresses(filePath, opts = {}) {
     }
   }
   const okCount = summary.filter((s) => s.ok).length;
-  console.log(c(C.bold, okCount + "/" + addresses.length + " address sukses."));
+  console.log(c(C.bold, okCount + "/" + addresses.length + " address sukses, total " + pool.length + " signature di pool."));
+
+  // Pool R-reuse LINTAS address (yang tidak terdeteksi di scan per-address)
+  if (pool.length >= 2) {
+    const baseHits = opts.hitsFile || CONFIG.hitsFile;
+    const crossHits = baseHits.replace(/\.txt$/, "") + "_CROSS.txt";
+    await detectReuse(pool, {
+      hitsFile: crossHits,
+      crossAddressOnly: true,
+      api: opts.api || DEFAULT_API,
+      saveHits: true,
+      checkBalance: true,
+    });
+  }
 }
 
 async function analyzeByTxid(txid, opts = {}) {
