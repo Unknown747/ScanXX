@@ -2,7 +2,7 @@
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha256";
 import { ripemd160 } from "@noble/hashes/ripemd160";
-import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -716,6 +716,54 @@ async function esploraFetch(base, path) {
   return ct.includes("json") ? r.json() : r.text();
 }
 
+const CACHE_DIR = ".btc-cache";
+const CACHE_TX = CACHE_DIR + "/tx";
+const CACHE_LIST = CACHE_DIR + "/addr";
+let CACHE_ENABLED = true;
+let CACHE_STATS = { hexHits: 0, hexMisses: 0, listHits: 0, listMisses: 0 };
+
+function ensureCacheDir() {
+  if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR);
+  if (!existsSync(CACHE_TX)) mkdirSync(CACHE_TX);
+  if (!existsSync(CACHE_LIST)) mkdirSync(CACHE_LIST);
+}
+
+async function fetchTxHexCached(base, txid) {
+  if (CACHE_ENABLED) {
+    const file = CACHE_TX + "/" + txid + ".hex";
+    if (existsSync(file)) {
+      CACHE_STATS.hexHits++;
+      return readFileSync(file, "utf8").trim();
+    }
+  }
+  CACHE_STATS.hexMisses++;
+  const hex = await esploraFetch(base, "/tx/" + txid + "/hex");
+  if (CACHE_ENABLED) {
+    try { ensureCacheDir(); writeFileSync(CACHE_TX + "/" + txid + ".hex", hex); } catch {}
+  }
+  return hex;
+}
+
+function loadAddressListCache(address) {
+  if (!CACHE_ENABLED) return null;
+  const file = CACHE_LIST + "/" + address + ".json";
+  if (!existsSync(file)) return null;
+  try {
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    if (data && Array.isArray(data.txs) && typeof data.ts === "number") return data;
+  } catch {}
+  return null;
+}
+
+function saveAddressListCache(address, txs) {
+  if (!CACHE_ENABLED) return;
+  try {
+    ensureCacheDir();
+    writeFileSync(CACHE_LIST + "/" + address + ".json",
+      JSON.stringify({ ts: Date.now(), address, txs }));
+  } catch {}
+}
+
 async function fetchAddressBalance(base, address) {
   try {
     const info = await esploraFetch(base, "/address/" + address);
@@ -783,7 +831,7 @@ async function processTxForAddress(tx, address, base) {
   }
   if (ourInputs.length === 0) return { sigs: [], err: null };
   let hex;
-  try { hex = await esploraFetch(base, "/tx/" + tx.txid + "/hex"); }
+  try { hex = await fetchTxHexCached(base, tx.txid); }
   catch (e) { return { sigs: [], err: "ambil " + tx.txid + ": " + e.message }; }
   let parsed;
   try { parsed = parseTx(hexToBytes(hex.trim())); }
@@ -847,9 +895,24 @@ async function analyzeAddress(address, opts) {
   console.log(c(C.bold, "\n=== Scan Address: " + address + " ==="));
   console.log("Sumber API :", base);
   console.log("Paralel    :", concurrency, "request");
-  process.stdout.write("Mengambil daftar transaksi\u2026 ");
-  const txs = await fetchAllTxsForAddress(base, address);
-  console.log(c(C.green, txs.length + " tx"));
+  console.log("Cache      :", CACHE_ENABLED ? c(C.green, "AKTIF (.btc-cache/)") : c(C.yellow, "NONAKTIF"));
+  CACHE_STATS = { hexHits: 0, hexMisses: 0, listHits: 0, listMisses: 0 };
+
+  let txs;
+  const cached = loadAddressListCache(address);
+  const useCachedList = cached && (Date.now() - cached.ts) < (opts.listMaxAgeMs || 6 * 3600 * 1000);
+  if (useCachedList) {
+    CACHE_STATS.listHits++;
+    const ageMin = ((Date.now() - cached.ts) / 60000).toFixed(1);
+    console.log("Daftar tx  :", c(C.cyan, "DARI CACHE (umur " + ageMin + " menit, " + cached.txs.length + " tx)"));
+    txs = cached.txs;
+  } else {
+    CACHE_STATS.listMisses++;
+    process.stdout.write("Mengambil daftar transaksi\u2026 ");
+    txs = await fetchAllTxsForAddress(base, address);
+    console.log(c(C.green, txs.length + " tx"));
+    saveAddressListCache(address, txs);
+  }
 
   if (txs.length === 0) {
     console.log(c(C.yellow, "Tidak ada transaksi untuk address ini."));
@@ -880,6 +943,13 @@ async function analyzeAddress(address, opts) {
     c(C.bold, allSigs.length + " signature") +
     " dari " + txs.length + " tx"
   );
+  if (CACHE_ENABLED) {
+    const total = CACHE_STATS.hexHits + CACHE_STATS.hexMisses;
+    const pct = total ? ((CACHE_STATS.hexHits / total) * 100).toFixed(1) : "0";
+    console.log(c(C.dim,
+      "Cache tx hex: " + CACHE_STATS.hexHits + " hit, " + CACHE_STATS.hexMisses +
+      " miss (" + pct + "% hit-rate)"));
+  }
   if (errors.length) {
     console.log(c(C.yellow, errors.length + " error saat ambil/parse:"));
     for (const e of errors.slice(0, 5)) console.log(c(C.dim, "  - " + e));
@@ -919,7 +989,7 @@ async function analyzeAddress(address, opts) {
 async function analyzeByTxid(txid, opts = {}) {
   const base = opts.api || DEFAULT_API;
   const meta = await esploraFetch(base, "/tx/" + txid);
-  const hex = await esploraFetch(base, "/tx/" + txid + "/hex");
+  const hex = await fetchTxHexCached(base, txid);
   const amounts = {};
   for (let i = 0; i < meta.vin.length; i++) {
     if (meta.vin[i].prevout && meta.vin[i].prevout.value !== undefined) {
@@ -959,6 +1029,8 @@ Opsi:
   --out <file.json>                      Simpan hasil scan ke file JSON
   --concurrency <n>                      Request paralel saat scan address (default 8)
   --hits <file.txt>                      File untuk simpan hit R-reuse (default hits.txt)
+  --no-cache                             Nonaktifkan cache lokal
+  clear-cache                            Hapus seluruh isi folder .btc-cache/
 
 Yang dianalisis dari setiap input:
   • R, S          (komponen ECDSA dari DER signature)
@@ -975,13 +1047,36 @@ Pemulihan Private Key:
 `);
 }
 
-const argv = process.argv.slice(2);
-const cmd = argv[0];
+const rawArgv = process.argv.slice(2);
+const FLAG_KEYS_WITH_VALUE = new Set(["api", "out", "hits", "concurrency", "amount"]);
+const FLAG_KEYS_BOOL = new Set(["no-cache", "verbose", "help", "h"]);
+const argv = [];
+for (let i = 0; i < rawArgv.length; i++) {
+  const a = rawArgv[i];
+  if (a.startsWith("--")) {
+    const k = a.slice(2);
+    argv.push(a);
+    if (FLAG_KEYS_WITH_VALUE.has(k)) { argv.push(rawArgv[++i]); }
+  } else {
+    argv.push(a);
+  }
+}
+const posArgs = [];
+for (let i = 0; i < rawArgv.length; i++) {
+  const a = rawArgv[i];
+  if (a.startsWith("--")) {
+    const k = a.slice(2);
+    if (FLAG_KEYS_WITH_VALUE.has(k)) i++;
+  } else {
+    posArgs.push(a);
+  }
+}
+const cmd = posArgs[0];
 const getOpt = (k) => {
-  const i = argv.indexOf("--" + k);
-  return i >= 0 ? argv[i + 1] : null;
+  const i = rawArgv.indexOf("--" + k);
+  return i >= 0 ? rawArgv[i + 1] : null;
 };
-const hasFlag = (k) => argv.includes("--" + k);
+const hasFlag = (k) => rawArgv.includes("--" + k);
 
 async function interactiveMenu() {
   const rl = createInterface({ input, output });
@@ -997,9 +1092,10 @@ async function interactiveMenu() {
     console.log("  " + c(C.cyan, "4") + ") Signature manual " + c(C.dim, "(masukkan R, S, Z)"));
     console.log("  " + c(C.cyan, "5") + ") Cek R-reuse dari file JSON");
     console.log("  " + c(C.cyan, "6") + ") Bantuan lengkap");
+    console.log("  " + c(C.cyan, "7") + ") Hapus cache (.btc-cache/)");
     console.log("  " + c(C.cyan, "0") + ") Keluar\n");
 
-    const choice = (await ask(c(C.bold, "Pilihan [1-6]: "))).trim();
+    const choice = (await ask(c(C.bold, "Pilihan [1-7]: "))).trim();
 
     if (choice === "0" || choice === "") { rl.close(); return; }
 
@@ -1047,6 +1143,15 @@ async function interactiveMenu() {
     } else if (choice === "6") {
       rl.close();
       help();
+    } else if (choice === "7") {
+      rl.close();
+      const fsx = await import("node:fs");
+      if (existsSync(CACHE_DIR)) {
+        fsx.rmSync(CACHE_DIR, { recursive: true, force: true });
+        console.log(c(C.green, "Cache .btc-cache/ dihapus."));
+      } else {
+        console.log("Tidak ada cache untuk dihapus.");
+      }
     } else {
       rl.close();
       console.log(c(C.red, "Pilihan tidak valid."));
@@ -1057,6 +1162,17 @@ async function interactiveMenu() {
 }
 
 async function main() {
+  if (hasFlag("no-cache")) CACHE_ENABLED = false;
+  if (cmd === "clear-cache") {
+    const fsx = await import("node:fs");
+    if (existsSync(CACHE_DIR)) {
+      fsx.rmSync(CACHE_DIR, { recursive: true, force: true });
+      console.log(c(C.green, "Cache .btc-cache/ dihapus."));
+    } else {
+      console.log("Tidak ada cache untuk dihapus.");
+    }
+    return;
+  }
   if (!cmd) {
     await interactiveMenu();
     return;
@@ -1066,11 +1182,11 @@ async function main() {
   } else if (cmd === "menu" || cmd === "i" || cmd === "interactive") {
     await interactiveMenu();
   } else if (cmd === "txid") {
-    if (!argv[1]) throw new Error("TXID wajib diisi");
-    await analyzeByTxid(argv[1], { api: getOpt("api") });
+    if (!posArgs[1]) throw new Error("TXID wajib diisi");
+    await analyzeByTxid(posArgs[1], { api: getOpt("api") });
   } else if (cmd === "address") {
-    if (!argv[1]) throw new Error("Address wajib diisi");
-    await analyzeAddress(argv[1], {
+    if (!posArgs[1]) throw new Error("Address wajib diisi");
+    await analyzeAddress(posArgs[1], {
       api: getOpt("api"),
       verbose: hasFlag("verbose"),
       out: getOpt("out"),
@@ -1079,7 +1195,7 @@ async function main() {
     });
   } else if (cmd === "tx" || cmd === "tx-file") {
     const hex =
-      cmd === "tx" ? argv[1] : readFileSync(argv[1], "utf8").trim();
+      cmd === "tx" ? posArgs[1] : readFileSync(posArgs[1], "utf8").trim();
     if (!hex) throw new Error("Hex transaksi kosong");
     const amounts = {};
     for (const a of argv.slice(2)) {
