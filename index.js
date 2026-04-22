@@ -808,12 +808,50 @@ async function analyzeManual(items) {
 // ============================================================
 // Esplora API client
 // ============================================================
+const RETRY = {
+  maxAttempts: (CONFIG.retry && CONFIG.retry.maxAttempts) || 6,
+  baseDelayMs: (CONFIG.retry && CONFIG.retry.baseDelayMs) || 500,
+  maxDelayMs: (CONFIG.retry && CONFIG.retry.maxDelayMs) || 15000,
+};
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
 async function esploraFetch(base, path) {
   const url = base + path;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error("HTTP " + r.status + " " + url);
-  const ct = r.headers.get("content-type") || "";
-  return ct.includes("json") ? r.json() : r.text();
+  let lastErr;
+  for (let attempt = 1; attempt <= RETRY.maxAttempts; attempt++) {
+    try {
+      const r = await fetch(url);
+      if (r.ok) {
+        const ct = r.headers.get("content-type") || "";
+        return ct.includes("json") ? await r.json() : await r.text();
+      }
+      // Hanya retry untuk 429 dan 5xx
+      if (r.status !== 429 && r.status < 500) {
+        throw new Error("HTTP " + r.status + " " + url);
+      }
+      lastErr = new Error("HTTP " + r.status + " " + url);
+      // Hormati header Retry-After bila ada
+      const ra = r.headers.get("retry-after");
+      let waitMs;
+      if (ra) {
+        const sec = parseFloat(ra);
+        waitMs = isFinite(sec) ? Math.min(RETRY.maxDelayMs, sec * 1000) : null;
+      }
+      if (waitMs == null) {
+        const exp = Math.min(RETRY.maxDelayMs, RETRY.baseDelayMs * 2 ** (attempt - 1));
+        waitMs = Math.floor(exp * (0.5 + Math.random() * 0.5)); // jitter
+      }
+      if (attempt < RETRY.maxAttempts) await sleep(waitMs);
+    } catch (e) {
+      lastErr = e;
+      // Error jaringan: retry juga
+      if (attempt < RETRY.maxAttempts) {
+        const exp = Math.min(RETRY.maxDelayMs, RETRY.baseDelayMs * 2 ** (attempt - 1));
+        await sleep(Math.floor(exp * (0.5 + Math.random() * 0.5)));
+      }
+    }
+  }
+  throw lastErr || new Error("Gagal fetch setelah " + RETRY.maxAttempts + " percobaan: " + url);
 }
 
 const CACHE_DIR = ".btc-cache";
