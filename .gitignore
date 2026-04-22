@@ -47,3 +47,9 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# btc-sig-analyzer runtime output
+.btc-cache/
+hits.txt
+hits.jsonl
+hits_LIVE.txt

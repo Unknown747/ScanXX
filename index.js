@@ -1049,24 +1049,11 @@ Pemulihan Private Key:
 
 const rawArgv = process.argv.slice(2);
 const FLAG_KEYS_WITH_VALUE = new Set(["api", "out", "hits", "concurrency", "amount"]);
-const FLAG_KEYS_BOOL = new Set(["no-cache", "verbose", "help", "h"]);
-const argv = [];
-for (let i = 0; i < rawArgv.length; i++) {
-  const a = rawArgv[i];
-  if (a.startsWith("--")) {
-    const k = a.slice(2);
-    argv.push(a);
-    if (FLAG_KEYS_WITH_VALUE.has(k)) { argv.push(rawArgv[++i]); }
-  } else {
-    argv.push(a);
-  }
-}
 const posArgs = [];
 for (let i = 0; i < rawArgv.length; i++) {
   const a = rawArgv[i];
   if (a.startsWith("--")) {
-    const k = a.slice(2);
-    if (FLAG_KEYS_WITH_VALUE.has(k)) i++;
+    if (FLAG_KEYS_WITH_VALUE.has(a.slice(2))) i++;
   } else {
     posArgs.push(a);
   }
@@ -1198,31 +1185,19 @@ async function main() {
       cmd === "tx" ? posArgs[1] : readFileSync(posArgs[1], "utf8").trim();
     if (!hex) throw new Error("Hex transaksi kosong");
     const amounts = {};
-    for (const a of argv.slice(2)) {
-      const m = a.match(/^--amount[= ](\d+)=(\d+)$/) || (a === "--amount" ? null : null);
+    for (let i = 0; i < rawArgv.length - 1; i++) {
+      if (rawArgv[i] !== "--amount") continue;
+      const m = rawArgv[i + 1].match(/^(\d+)=(\d+)$/);
       if (m) amounts[Number(m[1])] = Number(m[2]);
-    }
-    // dukung "--amount 0=12345" sebagai dua arg
-    for (let i = 0; i < argv.length - 1; i++) {
-      if (argv[i] === "--amount") {
-        const m = argv[i + 1].match(/^(\d+)=(\d+)$/);
-        if (m) amounts[Number(m[1])] = Number(m[2]);
-      }
     }
     await analyzeTx(hex, { amounts });
   } else if (cmd === "sig") {
-    const get = (k) => {
-      const i = argv.indexOf("--" + k);
-      return i >= 0 ? argv[i + 1] : null;
-    };
-    const r = get("r"),
-      s = get("s"),
-      z = get("z"),
-      pub = get("pub");
+    const r = getOpt("r"), s = getOpt("s"), z = getOpt("z"), pub = getOpt("pub");
     if (!r || !s || !z) throw new Error("Wajib --r, --s, --z");
     await analyzeManual([{ r, s, z, pubkey: pub }]);
   } else if (cmd === "reuse") {
-    const data = JSON.parse(readFileSync(argv[1], "utf8"));
+    if (!posArgs[1]) throw new Error("Path file JSON wajib diisi");
+    const data = JSON.parse(readFileSync(posArgs[1], "utf8"));
     if (!Array.isArray(data)) throw new Error("File harus berupa array JSON");
     await analyzeManual(data);
   } else {
