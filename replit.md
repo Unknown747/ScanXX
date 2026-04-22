@@ -29,10 +29,16 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - `node index.js clear-cache`
 - Flag global: `--api`, `--out`, `--hits`, `--verbose`, `--no-cache`
 
+## Konfigurasi
+- `config.json` (opsional, di .gitignore) menyimpan: `api`, `concurrency`,
+  `hitsFile`, `cache.{enabled,listMaxAgeHours}`, dan
+  `telegram.{enabled,botToken,chatId,notifyOnLiveOnly}`.
+- Telegram dipakai oleh `notifyTelegram()` saat ada hit R-reuse (default
+  hanya wallet hidup).
+
 ## Roadmap (belum dikerjakan)
 - Pooling R-reuse lintas address (ingat sig dari scan sebelumnya)
 - Batch scan address dari file
 - Retry otomatis pada HTTP 429
 - Dukungan Taproot (BIP-341)
 - Cek saldo segwit `bc1q...`
-- Notifikasi Telegram saat hit live
