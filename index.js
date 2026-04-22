@@ -940,6 +940,35 @@ async function detectReuse(sigs, opts = {}) {
       console.log(c(C.red, "Gagal menulis hits file: " + e.message));
     }
   }
+
+  // Ringkasan total saldo (BTC + USD) dari semua wallet hidup
+  if (recovered.length && opts.checkBalance !== false) {
+    let totalSat = 0n;
+    let liveWallets = 0;
+    for (const h of recovered) {
+      const slots = [h.balanceCompressed, h.balanceUncompressed, h.balanceSegwit, h.balanceP2sh];
+      let perKey = 0n;
+      for (const b of slots) {
+        if (b && b.balanceSat && b.balanceSat > 0) perKey += BigInt(b.balanceSat);
+      }
+      if (perKey > 0n) liveWallets++;
+      totalSat += perKey;
+    }
+    const totalBtc = Number(totalSat) / 1e8;
+    const usd = await fetchBtcUsdPrice();
+    const usdVal = usd ? totalBtc * usd : null;
+    console.log();
+    box(ICON.money + "  RINGKASAN TOTAL", [
+      c(C.dim, "Kunci dipulihkan ") + " " + c(C.bold, String(recovered.length)),
+      c(C.dim, "Wallet hidup     ") + " " + c(liveWallets > 0 ? C.green + C.bold : C.dim, String(liveWallets)),
+      c(C.dim, "Total saldo (BTC)") + " " +
+        (totalSat > 0n ? c(C.green + C.bold, formatBTC(Number(totalSat))) : c(C.dim, "0.00000000 BTC")),
+      c(C.dim, "Harga BTC/USD    ") + " " + (usd ? c(C.cyan, formatUSD(usd)) : c(C.yellow, "tidak tersedia")),
+      c(C.dim, "Nilai total (USD)") + " " +
+        (usdVal != null ? c(C.green + C.bold, formatUSD(usdVal)) : c(C.dim, "—")),
+    ], totalSat > 0n ? C.green : C.gray);
+  }
+
   return recovered;
 }
 
@@ -1106,6 +1135,34 @@ function saveAddressListCache(address, txs) {
     writeFileSync(CACHE_LIST + "/" + address + ".json",
       JSON.stringify({ ts: Date.now(), address, txs }));
   } catch {}
+}
+
+// Ambil harga BTC/USD dari beberapa sumber publik (cache 10 menit)
+let _BTC_USD = { price: null, ts: 0 };
+async function fetchBtcUsdPrice() {
+  if (_BTC_USD.price && Date.now() - _BTC_USD.ts < 10 * 60 * 1000) return _BTC_USD.price;
+  const sources = [
+    { url: "https://mempool.space/api/v1/prices", pick: (j) => j.USD },
+    { url: "https://api.coinbase.com/v2/prices/BTC-USD/spot", pick: (j) => Number(j.data && j.data.amount) },
+    { url: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", pick: (j) => j.bitcoin && j.bitcoin.usd },
+  ];
+  for (const src of sources) {
+    try {
+      const r = await fetch(src.url, { headers: { "user-agent": "btc-sig-analyzer/1.0" } });
+      if (!r.ok) continue;
+      const j = await r.json();
+      const p = Number(src.pick(j));
+      if (Number.isFinite(p) && p > 0) {
+        _BTC_USD = { price: p, ts: Date.now() };
+        return p;
+      }
+    } catch {}
+  }
+  return null;
+}
+function formatUSD(usd) {
+  if (usd == null || !Number.isFinite(usd)) return "—";
+  return "$" + usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 async function fetchAddressBalance(base, address) {
