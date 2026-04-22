@@ -1,0 +1,16 @@
+{
+  "name": "btc-sig-analyzer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "btc-sig": "./index.mjs"
+  },
+  "scripts": {
+    "start": "node ./index.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.6.0",
+    "@noble/hashes": "^1.5.0"
+  }
+}
