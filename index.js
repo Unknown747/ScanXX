@@ -730,16 +730,16 @@ function help() {
 ${c(C.bold, "btc-sig-analyzer")} — Penganalisis tanda tangan Bitcoin (CLI)
 
 Penggunaan:
-  node index.mjs tx <hex>                Analisis raw transaksi (hex)
-  node index.mjs tx-file <path>          Analisis raw transaksi dari file (hex)
-  node index.mjs txid <txid>             Ambil & analisis tx via TXID (online)
-  node index.mjs address <addr>          Scan SEMUA tx dari address (online)
+  node index.js tx <hex>                Analisis raw transaksi (hex)
+  node index.js tx-file <path>          Analisis raw transaksi dari file (hex)
+  node index.js txid <txid>             Ambil & analisis tx via TXID (online)
+  node index.js address <addr>          Scan SEMUA tx dari address (online)
                                          ekstrak R/S/Z, cari R-reuse otomatis
-  node index.mjs sig --r <hex> --s <hex> --z <hex> [--pub <hex>]
+  node index.js sig --r <hex> --s <hex> --z <hex> [--pub <hex>]
                                          Analisis satu signature manual
-  node index.mjs reuse <file.json>       Cari R-reuse dari daftar signature JSON
+  node index.js reuse <file.json>       Cari R-reuse dari daftar signature JSON
                                          Format: [{r,s,z,pubkey?}, ...]
-  node index.mjs help                    Tampilkan bantuan
+  node index.js help                    Tampilkan bantuan
 
 Opsi:
   --amount <i>=<satoshi>                 Nilai input ke-i (untuk 'tx' SegWit)
