@@ -3,6 +3,10 @@ import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha256";
 import { ripemd160 } from "@noble/hashes/ripemd160";
 import { readFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
+
+const DEFAULT_API = "https://mempool.space/api";
 
 // ============================================================
 // Utilitas hex/bytes
@@ -717,7 +721,7 @@ async function runWithConcurrency(items, limit, worker, onProgress) {
 
 async function analyzeAddress(address, opts) {
   if (!opts) opts = {};
-  const base = opts.api || "https://blockstream.info/api";
+  const base = opts.api || DEFAULT_API;
   const concurrency = opts.concurrency || 8;
   console.log(c(C.bold, "\n=== Scan Address: " + address + " ==="));
   console.log("Sumber API :", base);
@@ -786,7 +790,7 @@ async function analyzeAddress(address, opts) {
 }
 
 async function analyzeByTxid(txid, opts = {}) {
-  const base = opts.api || "https://blockstream.info/api";
+  const base = opts.api || DEFAULT_API;
   const meta = await esploraFetch(base, "/tx/" + txid);
   const hex = await esploraFetch(base, "/tx/" + txid + "/hex");
   const amounts = {};
@@ -807,6 +811,7 @@ function help() {
 ${c(C.bold, "btc-sig-analyzer")} — Penganalisis tanda tangan Bitcoin (CLI)
 
 Penggunaan:
+  node index.js                         Mode interaktif (menu pilihan)
   node index.js tx <hex>                Analisis raw transaksi (hex)
   node index.js tx-file <path>          Analisis raw transaksi dari file (hex)
   node index.js txid <txid>             Ambil & analisis tx via TXID (online)
@@ -821,8 +826,8 @@ Penggunaan:
 Opsi:
   --amount <i>=<satoshi>                 Nilai input ke-i (untuk 'tx' SegWit)
   --api <url>                            Endpoint Esplora kustom
-                                         (default https://blockstream.info/api)
-                                         testnet: https://blockstream.info/testnet/api
+                                         (default https://mempool.space/api)
+                                         testnet: https://mempool.space/testnet/api
   --verbose                              Tampilkan tiap R/S/Z saat scan address
   --out <file.json>                      Simpan hasil scan ke file JSON
   --concurrency <n>                      Request paralel saat scan address (default 8)
@@ -850,9 +855,86 @@ const getOpt = (k) => {
 };
 const hasFlag = (k) => argv.includes("--" + k);
 
+async function interactiveMenu() {
+  const rl = createInterface({ input, output });
+  const ask = (q) => rl.question(q);
+  try {
+    console.log(c(C.bold, "\n╔══════════════════════════════════════════════════════╗"));
+    console.log(c(C.bold, "║      btc-sig-analyzer  —  Mode Interaktif            ║"));
+    console.log(c(C.bold, "╚══════════════════════════════════════════════════════╝"));
+    console.log("Pilih jenis analisis:\n");
+    console.log("  " + c(C.cyan, "1") + ") Scan Address  " + c(C.dim, "(semua tx dari 1 wallet, cari R-reuse)"));
+    console.log("  " + c(C.cyan, "2") + ") Analisis TXID " + c(C.dim, "(1 transaksi via TXID)"));
+    console.log("  " + c(C.cyan, "3") + ") Raw TX hex    " + c(C.dim, "(tempel hex transaksi)"));
+    console.log("  " + c(C.cyan, "4") + ") Signature manual " + c(C.dim, "(masukkan R, S, Z)"));
+    console.log("  " + c(C.cyan, "5") + ") Cek R-reuse dari file JSON");
+    console.log("  " + c(C.cyan, "6") + ") Bantuan lengkap");
+    console.log("  " + c(C.cyan, "0") + ") Keluar\n");
+
+    const choice = (await ask(c(C.bold, "Pilihan [1-6]: "))).trim();
+
+    if (choice === "0" || choice === "") { rl.close(); return; }
+
+    if (choice === "1") {
+      const addr = (await ask("Address Bitcoin     : ")).trim();
+      if (!addr) throw new Error("Address kosong");
+      const apiIn = (await ask("API endpoint        [" + DEFAULT_API + "]: ")).trim();
+      const conIn = (await ask("Paralel request     [8]: ")).trim();
+      const verIn = (await ask("Verbose tampilkan tiap signature? (y/N): ")).trim().toLowerCase();
+      const outIn = (await ask("Simpan ke file JSON [kosong = tidak]: ")).trim();
+      rl.close();
+      await analyzeAddress(addr, {
+        api: apiIn || DEFAULT_API,
+        concurrency: conIn ? Math.max(1, parseInt(conIn, 10)) : 8,
+        verbose: verIn === "y" || verIn === "ya",
+        out: outIn || null,
+      });
+    } else if (choice === "2") {
+      const txid = (await ask("TXID                : ")).trim();
+      if (!txid) throw new Error("TXID kosong");
+      const apiIn = (await ask("API endpoint        [" + DEFAULT_API + "]: ")).trim();
+      rl.close();
+      await analyzeByTxid(txid, { api: apiIn || DEFAULT_API });
+    } else if (choice === "3") {
+      const hex = (await ask("Raw TX hex          : ")).trim();
+      if (!hex) throw new Error("Hex kosong");
+      rl.close();
+      analyzeTx(hex, { amounts: {} });
+    } else if (choice === "4") {
+      const r = (await ask("R (hex)             : ")).trim();
+      const s = (await ask("S (hex)             : ")).trim();
+      const z = (await ask("Z / sighash (hex)   : ")).trim();
+      const pub = (await ask("Public key (hex, opsional): ")).trim();
+      rl.close();
+      if (!r || !s || !z) throw new Error("R, S, dan Z wajib diisi");
+      analyzeManual([{ r, s, z, pubkey: pub || undefined }]);
+    } else if (choice === "5") {
+      const path = (await ask("Path file JSON      : ")).trim();
+      rl.close();
+      const data = JSON.parse(readFileSync(path, "utf8"));
+      if (!Array.isArray(data)) throw new Error("File harus berupa array JSON");
+      analyzeManual(data);
+    } else if (choice === "6") {
+      rl.close();
+      help();
+    } else {
+      rl.close();
+      console.log(c(C.red, "Pilihan tidak valid."));
+    }
+  } finally {
+    try { rl.close(); } catch {}
+  }
+}
+
 async function main() {
-  if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") {
+  if (!cmd) {
+    await interactiveMenu();
+    return;
+  }
+  if (cmd === "help" || cmd === "-h" || cmd === "--help") {
     help();
+  } else if (cmd === "menu" || cmd === "i" || cmd === "interactive") {
+    await interactiveMenu();
   } else if (cmd === "txid") {
     if (!argv[1]) throw new Error("TXID wajib diisi");
     await analyzeByTxid(argv[1], { api: getOpt("api") });
