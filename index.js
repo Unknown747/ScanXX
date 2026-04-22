@@ -1123,6 +1123,49 @@ async function analyzeAddress(address, opts) {
   return allSigs;
 }
 
+// ============================================================
+// Batch scan: banyak address dari satu file (1 address per baris)
+// Baris kosong dan baris diawali '#' diabaikan.
+// ============================================================
+async function batchAddresses(filePath, opts = {}) {
+  const raw = readFileSync(filePath, "utf8");
+  const addresses = raw.split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"));
+  if (addresses.length === 0) {
+    console.log(c(C.yellow, "Tidak ada address yang valid di file: " + filePath));
+    return;
+  }
+  console.log(c(C.bold, "\n=== Batch scan " + addresses.length + " address ==="));
+  console.log("File       :", filePath);
+  console.log("Hits file  :", opts.hitsFile || CONFIG.hitsFile);
+
+  const summary = [];
+  const startAll = Date.now();
+  for (let i = 0; i < addresses.length; i++) {
+    const addr = addresses[i];
+    sep("[" + (i + 1) + "/" + addresses.length + "] " + addr);
+    try {
+      const sigs = await analyzeAddress(addr, opts);
+      summary.push({ addr, ok: true, sigCount: sigs ? sigs.length : 0 });
+    } catch (e) {
+      console.log(c(C.red, "Gagal scan " + addr + ": " + e.message));
+      summary.push({ addr, ok: false, error: e.message });
+    }
+  }
+  const elapsed = ((Date.now() - startAll) / 1000).toFixed(1);
+  sep("Ringkasan batch (" + elapsed + " dtk)");
+  for (const s of summary) {
+    if (s.ok) {
+      console.log(c(C.green, "  ✓ ") + s.addr + c(C.dim, "  " + s.sigCount + " sig"));
+    } else {
+      console.log(c(C.red, "  ✗ ") + s.addr + c(C.dim, "  " + s.error));
+    }
+  }
+  const okCount = summary.filter((s) => s.ok).length;
+  console.log(c(C.bold, okCount + "/" + addresses.length + " address sukses."));
+}
+
 async function analyzeByTxid(txid, opts = {}) {
   const base = opts.api || DEFAULT_API;
   const meta = await esploraFetch(base, "/tx/" + txid);
@@ -1151,6 +1194,8 @@ Penggunaan:
   node index.js txid <txid>             Ambil & analisis tx via TXID (online)
   node index.js address <addr>          Scan SEMUA tx dari address (online)
                                          ekstrak R/S/Z, cari R-reuse otomatis
+  node index.js batch <file>            Scan banyak address dari file (1 baris = 1 addr,
+                                         baris '#' diabaikan sebagai komentar)
   node index.js sig --r <hex> --s <hex> --z <hex> [--pub <hex>]
                                          Analisis satu signature manual
   node index.js reuse <file.json>       Cari R-reuse dari daftar signature JSON
@@ -1232,9 +1277,10 @@ async function interactiveMenu() {
     console.log("  " + c(C.cyan, "5") + ") Cek R-reuse dari file JSON");
     console.log("  " + c(C.cyan, "6") + ") Bantuan lengkap");
     console.log("  " + c(C.cyan, "7") + ") Hapus cache (.btc-cache/)");
+    console.log("  " + c(C.cyan, "8") + ") Batch scan dari file " + c(C.dim, "(daftar address, 1 per baris)"));
     console.log("  " + c(C.cyan, "0") + ") Keluar\n");
 
-    const choice = (await ask(c(C.bold, "Pilihan [0-7]: "))).trim();
+    const choice = (await ask(c(C.bold, "Pilihan [0-8]: "))).trim();
 
     if (choice === "0" || choice === "") { rl.close(); return; }
 
@@ -1290,6 +1336,18 @@ async function interactiveMenu() {
       } else {
         console.log("Tidak ada cache untuk dihapus.");
       }
+    } else if (choice === "8") {
+      const fpath = (await ask("Path file daftar address: ")).trim();
+      const apiIn = (await ask("API endpoint        [" + DEFAULT_API + "]: ")).trim();
+      const conIn = (await ask("Paralel request     [" + CONFIG.concurrency + "]: ")).trim();
+      const hitsIn = (await ask("File untuk simpan hit R-reuse [" + CONFIG.hitsFile + "]: ")).trim();
+      rl.close();
+      if (!fpath) throw new Error("Path file kosong");
+      await batchAddresses(fpath, {
+        api: apiIn || DEFAULT_API,
+        concurrency: conIn ? Math.max(1, parseInt(conIn, 10)) : CONFIG.concurrency,
+        hitsFile: hitsIn || CONFIG.hitsFile,
+      });
     } else {
       rl.close();
       console.log(c(C.red, "Pilihan tidak valid."));
@@ -1350,6 +1408,15 @@ async function main() {
     const data = JSON.parse(readFileSync(posArgs[1], "utf8"));
     if (!Array.isArray(data)) throw new Error("File harus berupa array JSON");
     await analyzeManual(data);
+  } else if (cmd === "batch") {
+    if (!posArgs[1]) throw new Error("Path file daftar address wajib diisi");
+    await batchAddresses(posArgs[1], {
+      api: getOpt("api"),
+      verbose: hasFlag("verbose"),
+      out: getOpt("out"),
+      hitsFile: getOpt("hits") || CONFIG.hitsFile,
+      concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
+    });
   } else {
     console.error(c(C.red, "Perintah tidak dikenal: " + cmd));
     help();
