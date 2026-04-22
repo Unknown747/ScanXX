@@ -407,13 +407,95 @@ const C = {
   red: "\x1b[31m",
   green: "\x1b[32m",
   yellow: "\x1b[33m",
+  blue: "\x1b[34m",
   cyan: "\x1b[36m",
   magenta: "\x1b[35m",
+  gray: "\x1b[90m",
+  bgBlue: "\x1b[44m",
+  bgGreen: "\x1b[42m",
+  bgRed: "\x1b[41m",
 };
-const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
+const useColor = !process.env.NO_COLOR && (process.stdout.isTTY || !!process.env.FORCE_COLOR);
 const c = (col, s) => (useColor ? col + s + C.reset : s);
-const sep = (t = "") =>
-  console.log(c(C.dim, "─".repeat(8)) + " " + c(C.bold, t) + " " + c(C.dim, "─".repeat(Math.max(0, 60 - t.length))));
+const W = 64; // lebar visual default
+
+const sep = (t = "") => {
+  if (!t) {
+    console.log(c(C.gray, "─".repeat(W)));
+    return;
+  }
+  const left = "─── ";
+  const right = " " + "─".repeat(Math.max(3, W - left.length - t.length - 1));
+  console.log(c(C.gray, left) + c(C.bold + C.cyan, t) + c(C.gray, right));
+};
+
+// Header berbingkai dengan judul (untuk memulai sebuah analisis)
+function header(title, subtitle) {
+  const inner = W - 2;
+  const top = "╭" + "─".repeat(inner) + "╮";
+  const bot = "╰" + "─".repeat(inner) + "╯";
+  const pad = (s) => {
+    const visible = s.replace(/\x1b\[[0-9;]*m/g, "");
+    const space = Math.max(0, inner - visible.length - 2);
+    return "│ " + s + " ".repeat(space) + " │";
+  };
+  console.log(c(C.cyan, top));
+  console.log(c(C.cyan, "│ ") + c(C.bold + C.cyan, title.padEnd(inner - 2)) + c(C.cyan, " │"));
+  if (subtitle) console.log(c(C.cyan, pad(c(C.dim, subtitle))));
+  console.log(c(C.cyan, bot));
+}
+
+// Baris key-value dengan label rata kanan
+function kv(label, value, color) {
+  const lab = label.padEnd(14);
+  const val = color ? c(color, String(value)) : String(value);
+  console.log(c(C.gray, "  " + lab + " ") + c(C.gray, "│ ") + val);
+}
+
+// Kotak penegasan (untuk blok private key yang dipulihkan)
+function box(title, lines, accent) {
+  accent = accent || C.green;
+  const inner = W - 2;
+  const top = "╔" + "═".repeat(inner) + "╗";
+  const mid = "╟" + "─".repeat(inner) + "╢";
+  const bot = "╚" + "═".repeat(inner) + "╝";
+  const padLine = (s) => {
+    const visible = s.replace(/\x1b\[[0-9;]*m/g, "");
+    const space = Math.max(0, inner - visible.length - 2);
+    return c(accent, "║ ") + s + " ".repeat(space) + c(accent, " ║");
+  };
+  console.log(c(accent + C.bold, top));
+  console.log(padLine(c(accent + C.bold, title.padEnd(inner - 2))));
+  console.log(c(accent, mid));
+  for (const ln of lines) console.log(padLine(ln));
+  console.log(c(accent + C.bold, bot));
+}
+
+const ICON = {
+  ok: useColor ? "\x1b[32m✓\x1b[0m" : "[v]",
+  err: useColor ? "\x1b[31m✗\x1b[0m" : "[x]",
+  warn: useColor ? "\x1b[33m⚠\x1b[0m" : "[!]",
+  info: useColor ? "\x1b[36mℹ\x1b[0m" : "[i]",
+  key: useColor ? "\x1b[33m🔑\x1b[0m" : "[KEY]",
+  money: useColor ? "\x1b[32m💰\x1b[0m" : "[$]",
+  alert: useColor ? "\x1b[31m🚨\x1b[0m" : "[!!]",
+  arrow: useColor ? "\x1b[36m›\x1b[0m" : ">",
+};
+
+function banner() {
+  if (!useColor) {
+    console.log("btc-sig-analyzer — Bitcoin signature R/S/Z extractor");
+    return;
+  }
+  const lines = [
+    "╭──────────────────────────────────────────────────────────────╮",
+    "│  ₿  btc-sig-analyzer  •  ECDSA R/S/Z extractor & recovery   │",
+    "╰──────────────────────────────────────────────────────────────╯",
+  ];
+  console.log(c(C.cyan + C.bold, lines[0]));
+  console.log(c(C.cyan + C.bold, lines[1]));
+  console.log(c(C.cyan + C.bold, lines[2]));
+}
 
 // ============================================================
 // Analisis transaksi
@@ -421,12 +503,13 @@ const sep = (t = "") =>
 async function analyzeTx(rawHex, opts = {}) {
   const buf = hexToBytes(rawHex);
   const tx = parseTx(buf);
-  console.log(c(C.bold, "\n=== Analisis Transaksi Bitcoin ==="));
-  console.log("Versi        :", tx.version);
-  console.log("Jumlah input :", tx.vin.length);
-  console.log("Jumlah output:", tx.vout.length);
-  console.log("Locktime     :", tx.locktime);
-  console.log("SegWit       :", tx.hasWitness ? "Ya" : "Tidak");
+  console.log();
+  header("Analisis Transaksi Bitcoin", "Ekstraksi R/S/Z dari setiap input");
+  kv("Versi", tx.version);
+  kv("Input", tx.vin.length);
+  kv("Output", tx.vout.length);
+  kv("Locktime", tx.locktime);
+  kv("SegWit", tx.hasWitness ? "Ya" : "Tidak", tx.hasWitness ? C.cyan : C.dim);
 
   const sigs = [];
 
@@ -578,14 +661,16 @@ async function detectReuse(sigs, opts = {}) {
               const addrUncompressed = p2pkhAddress(hash160(pubUncompressed));
               const wifC = toWIF(d, 0x80, true);
               const wifU = toWIF(d, 0x80, false);
-              console.log(c(C.green, "\n   ✓ PRIVATE KEY DIPULIHKAN"));
-              console.log("     k (nonce)         :", c(C.magenta, padHex(k)));
-              console.log("     d (priv hex)      :", c(C.green + C.bold, dHex));
-              console.log("     WIF (compressed)  :", c(C.green, wifC));
-              console.log("     WIF (uncompressed):", c(C.green, wifU));
-              console.log("     Pubkey cocok      :", matchedPub);
-              console.log("     Address (comp)    :", c(C.green + C.bold, addrCompressed));
-              console.log("     Address (uncomp)  :", c(C.green + C.bold, addrUncompressed));
+              console.log();
+              box(ICON.key + "  PRIVATE KEY DIPULIHKAN", [
+                c(C.dim, "Nonce k       ") + " " + c(C.magenta, padHex(k)),
+                c(C.dim, "Priv (hex)    ") + " " + c(C.green + C.bold, dHex),
+                c(C.dim, "WIF compressed") + " " + c(C.green, wifC),
+                c(C.dim, "WIF uncompres ") + " " + c(C.green, wifU),
+                c(C.dim, "Pubkey match  ") + " " + matchedPub,
+                c(C.dim, "Addr comp     ") + " " + c(C.green + C.bold, addrCompressed),
+                c(C.dim, "Addr uncomp   ") + " " + c(C.green + C.bold, addrUncompressed),
+              ], C.green);
 
               recovered.push({
                 ts: new Date().toISOString(),
@@ -613,7 +698,16 @@ async function detectReuse(sigs, opts = {}) {
   // Cek saldo otomatis untuk setiap address yang dipulihkan
   if (recovered.length && opts.checkBalance !== false) {
     const base = opts.api || DEFAULT_API;
-    console.log(c(C.bold, "\nMengecek saldo " + (recovered.length * 2) + " address di " + base + "…"));
+    console.log();
+    sep("Pengecekan Saldo (" + (recovered.length * 2) + " address di " + base + ")");
+    const fmtBalance = (b, label) => {
+      if (b.balanceSat == null) return c(C.red, ICON.err + " error " + label);
+      const live = b.balanceSat > 0;
+      const head = live
+        ? ICON.money + " " + c(C.green + C.bold, formatBTC(b.balanceSat))
+        : c(C.dim, "  0.00000000 BTC");
+      return head + c(C.gray, "   " + label + " · diterima " + formatBTC(b.totalReceivedSat) + " · " + b.txCount + " tx");
+    };
     for (const h of recovered) {
       const [bC, bU] = await Promise.all([
         fetchAddressBalance(base, h.addressCompressed),
@@ -621,18 +715,11 @@ async function detectReuse(sigs, opts = {}) {
       ]);
       h.balanceCompressed = bC;
       h.balanceUncompressed = bU;
-      const liveC = bC.balanceSat && bC.balanceSat > 0;
-      const liveU = bU.balanceSat && bU.balanceSat > 0;
-      const tag = (liveC || liveU) ? c(C.green + C.bold, " *** ADA SALDO ***") : "";
-      console.log(c(C.dim, "  " + h.addressCompressed + " (comp)  ") +
-        (bC.balanceSat == null ? c(C.red, "error") :
-         (bC.balanceSat > 0 ? c(C.green + C.bold, formatBTC(bC.balanceSat)) : c(C.dim, "0 BTC")) +
-         c(C.dim, "  total diterima: " + formatBTC(bC.totalReceivedSat) + ", " + bC.txCount + " tx")) +
-        tag);
-      console.log(c(C.dim, "  " + h.addressUncompressed + " (uncmp) ") +
-        (bU.balanceSat == null ? c(C.red, "error") :
-         (bU.balanceSat > 0 ? c(C.green + C.bold, formatBTC(bU.balanceSat)) : c(C.dim, "0 BTC")) +
-         c(C.dim, "  total diterima: " + formatBTC(bU.totalReceivedSat) + ", " + bU.txCount + " tx")));
+      const live = (bC.balanceSat && bC.balanceSat > 0) || (bU.balanceSat && bU.balanceSat > 0);
+      console.log(c(live ? C.green + C.bold : C.dim, "\n  " + h.addressCompressed) + (live ? "  " + ICON.alert + c(C.red + C.bold, " WALLET HIDUP") : ""));
+      console.log("    " + fmtBalance(bC, "compressed"));
+      console.log(c(live ? C.green + C.bold : C.dim, "  " + h.addressUncompressed));
+      console.log("    " + fmtBalance(bU, "uncompressed"));
     }
 
     // Notifikasi Telegram (jika diaktifkan di config.json)
@@ -942,12 +1029,15 @@ async function fetchAllTxsForAddress(base, address) {
   return all;
 }
 
-function drawProgress(done, total, startTs, label) {
-  if (label === undefined) label = "";
+function drawProgress(done, total, startTs, label = "") {
   const w = 30;
   const pct = total ? done / total : 0;
   const filled = Math.round(pct * w);
-  const bar = "\u2588".repeat(filled) + "\u2591".repeat(w - filled);
+  // Gradien: hijau di kepala, cyan di tubuh, gelap di sisa
+  const head = filled > 0 ? c(C.green + C.bold, "█") : "";
+  const body = filled > 1 ? c(C.cyan, "█".repeat(filled - 1)) : "";
+  const tail = c(C.gray, "░".repeat(w - filled));
+  const bar = head + body + tail;
   const elapsed = (Date.now() - startTs) / 1000;
   const rate = done / Math.max(elapsed, 0.001);
   const eta = rate > 0 ? Math.max(0, (total - done) / rate) : 0;
@@ -957,11 +1047,12 @@ function drawProgress(done, total, startTs, label) {
     return m + "m" + String(sec).padStart(2, "0") + "s";
   };
   const line =
-    "\r" + c(C.cyan, bar) + " " +
-    c(C.bold, done + "/" + total) +
-    " (" + (pct * 100).toFixed(1) + "%)  " +
-    rate.toFixed(1) + "/dtk  ETA " + fmt(eta) +
-    (label ? "  " + c(C.dim, label) : "") +
+    "\r" + bar + " " +
+    c(C.bold, (pct * 100).toFixed(1).padStart(5) + "%") +
+    c(C.gray, "  " + done + "/" + total) +
+    c(C.gray, "  " + rate.toFixed(1) + "/dtk") +
+    c(C.gray, "  ETA " + fmt(eta)) +
+    (label ? c(C.dim, "  " + label) : "") +
     "\x1b[K";
   process.stdout.write(line);
 }
@@ -1034,10 +1125,12 @@ async function analyzeAddress(address, opts) {
   if (!opts) opts = {};
   const base = opts.api || DEFAULT_API;
   const concurrency = opts.concurrency || 8;
-  console.log(c(C.bold, "\n=== Scan Address: " + address + " ==="));
-  console.log("Sumber API :", base);
-  console.log("Paralel    :", concurrency, "request");
-  console.log("Cache      :", CACHE_ENABLED ? c(C.green, "AKTIF (.btc-cache/)") : c(C.yellow, "NONAKTIF"));
+  console.log();
+  header("Scan Address Wallet", address);
+  kv("API", base, C.cyan);
+  kv("Paralel", concurrency + " request", C.bold);
+  kv("Cache", CACHE_ENABLED ? "AKTIF (.btc-cache/)" : "NONAKTIF",
+     CACHE_ENABLED ? C.green : C.yellow);
   CACHE_STATS = { hexHits: 0, hexMisses: 0, listHits: 0, listMisses: 0 };
 
   let txs;
@@ -1140,9 +1233,11 @@ async function batchAddresses(filePath, opts = {}) {
     console.log(c(C.yellow, "Tidak ada address yang valid di file: " + filePath));
     return;
   }
-  console.log(c(C.bold, "\n=== Batch scan " + addresses.length + " address ==="));
-  console.log("File       :", filePath);
-  console.log("Hits file  :", opts.hitsFile || CONFIG.hitsFile);
+  console.log();
+  header("Batch Scan", addresses.length + " address dari " + filePath);
+  kv("Hits file", opts.hitsFile || CONFIG.hitsFile, C.cyan);
+  kv("API", opts.api || DEFAULT_API);
+  kv("Paralel", (opts.concurrency || CONFIG.concurrency) + " request");
 
   const summary = [];
   const pool = [];
@@ -1207,10 +1302,10 @@ async function analyzeByTxid(txid, opts = {}) {
 // CLI
 // ============================================================
 function help() {
+  console.log();
+  banner();
   console.log(`
-${c(C.bold, "btc-sig-analyzer")} — Penganalisis tanda tangan Bitcoin (CLI)
-
-Penggunaan:
+${c(C.bold + C.cyan, "PENGGUNAAN")}
   node index.js                         Mode interaktif (menu pilihan)
   node index.js tx <hex>                Analisis raw transaksi (hex)
   node index.js tx-file <path>          Analisis raw transaksi dari file (hex)
@@ -1289,21 +1384,23 @@ async function interactiveMenu() {
   const rl = createInterface({ input, output });
   const ask = (q) => rl.question(q);
   try {
-    console.log(c(C.bold, "\n╔══════════════════════════════════════════════════════╗"));
-    console.log(c(C.bold, "║      btc-sig-analyzer  —  Mode Interaktif            ║"));
-    console.log(c(C.bold, "╚══════════════════════════════════════════════════════╝"));
-    console.log("Pilih jenis analisis:\n");
-    console.log("  " + c(C.cyan, "1") + ") Scan Address  " + c(C.dim, "(semua tx dari 1 wallet, cari R-reuse)"));
-    console.log("  " + c(C.cyan, "2") + ") Analisis TXID " + c(C.dim, "(1 transaksi via TXID)"));
-    console.log("  " + c(C.cyan, "3") + ") Raw TX hex    " + c(C.dim, "(tempel hex transaksi)"));
-    console.log("  " + c(C.cyan, "4") + ") Signature manual " + c(C.dim, "(masukkan R, S, Z)"));
-    console.log("  " + c(C.cyan, "5") + ") Cek R-reuse dari file JSON");
-    console.log("  " + c(C.cyan, "6") + ") Bantuan lengkap");
-    console.log("  " + c(C.cyan, "7") + ") Hapus cache (.btc-cache/)");
-    console.log("  " + c(C.cyan, "8") + ") Batch scan dari file " + c(C.dim, "(daftar address, 1 per baris)"));
-    console.log("  " + c(C.cyan, "0") + ") Keluar\n");
-
-    const choice = (await ask(c(C.bold, "Pilihan [0-8]: "))).trim();
+    console.log();
+    banner();
+    console.log(c(C.dim, "  Mode interaktif · pilih analisis di bawah\n"));
+    const item = (n, title, hint) =>
+      console.log("  " + c(C.cyan + C.bold, n) + c(C.gray, " │ ") +
+        c(C.bold, title.padEnd(26)) + c(C.dim, hint || ""));
+    item("1", "Scan Address",        "semua tx dari 1 wallet, cari R-reuse");
+    item("2", "Analisis TXID",       "1 transaksi via TXID");
+    item("3", "Raw TX hex",          "tempel hex transaksi");
+    item("4", "Signature manual",    "masukkan R, S, Z");
+    item("5", "R-reuse dari JSON",   "file daftar signature");
+    item("6", "Bantuan lengkap",     "tampilkan dokumentasi");
+    item("7", "Hapus cache",         ".btc-cache/");
+    item("8", "Batch scan file",     "daftar address, 1 per baris");
+    item("0", "Keluar",              "");
+    console.log();
+    const choice = (await ask(c(C.cyan + C.bold, "  " + ICON.arrow + " Pilihan [0-8]: "))).trim();
 
     if (choice === "0" || choice === "") { rl.close(); return; }
 
