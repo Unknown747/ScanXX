@@ -601,6 +601,128 @@ function analyzeManual(items) {
 }
 
 // ============================================================
+// Esplora API client
+// ============================================================
+async function esploraFetch(base, path) {
+  const url = base + path;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("HTTP " + r.status + " " + url);
+  const ct = r.headers.get("content-type") || "";
+  return ct.includes("json") ? r.json() : r.text();
+}
+
+async function fetchAllTxsForAddress(base, address) {
+  const all = [];
+  let lastSeen = null;
+  while (true) {
+    const path = lastSeen
+      ? "/address/" + address + "/txs/chain/" + lastSeen
+      : "/address/" + address + "/txs";
+    const page = await esploraFetch(base, path);
+    if (!Array.isArray(page) || page.length === 0) break;
+    all.push(...page);
+    if (page.length < 25) break;
+    lastSeen = page[page.length - 1].txid;
+  }
+  return all;
+}
+
+async function analyzeAddress(address, opts = {}) {
+  const base = opts.api || "https://blockstream.info/api";
+  console.log(c(C.bold, "\n=== Scan Address: " + address + " ==="));
+  console.log("Sumber API:", base);
+  process.stdout.write("Mengambil daftar transaksi… ");
+  const txs = await fetchAllTxsForAddress(base, address);
+  console.log(c(C.green, txs.length + " tx"));
+
+  const allSigs = [];
+  let processed = 0;
+  for (const tx of txs) {
+    processed++;
+    process.stdout.write("\r[" + processed + "/" + txs.length + "] " + tx.txid.slice(0, 16) + "…  ");
+    const ourInputs = [];
+    for (let i = 0; i < tx.vin.length; i++) {
+      if (tx.vin[i].prevout && tx.vin[i].prevout.scriptpubkey_address === address) ourInputs.push(i);
+    }
+    if (ourInputs.length === 0) continue;
+    let hex;
+    try { hex = await esploraFetch(base, "/tx/" + tx.txid + "/hex"); }
+    catch (e) { console.log(c(C.red, "\n  Gagal ambil " + tx.txid + ": " + e.message)); continue; }
+    let parsed;
+    try { parsed = parseTx(hexToBytes(hex.trim())); }
+    catch (e) { console.log(c(C.red, "\n  Gagal parse " + tx.txid + ": " + e.message)); continue; }
+    for (const i of ourInputs) {
+      const vi = parsed.vin[i];
+      let pushes = parseScriptPushes(vi.scriptSig);
+      let isWitness = false;
+      if (pushes.length < 2 && vi.witness.length >= 2) { pushes = vi.witness; isWitness = true; }
+      if (pushes.length < 2) continue;
+      let der;
+      try { der = parseDER(pushes[0]); } catch { continue; }
+      const pubBytes = pushes[1];
+      const pubHash = hash160(pubBytes);
+      const sht = der.sighashType == null ? 1 : der.sighashType;
+      let z = null;
+      try {
+        const scriptCode = concat(new Uint8Array([0x76, 0xa9, 0x14]), pubHash, new Uint8Array([0x88, 0xac]));
+        if (isWitness) {
+          const amt = tx.vin[i].prevout && tx.vin[i].prevout.value;
+          if (amt === undefined) continue;
+          z = BigInt("0x" + bytesToHex(bip143Sighash(parsed, i, scriptCode, amt, sht)));
+        } else {
+          z = BigInt("0x" + bytesToHex(legacySighash(parsed, i, scriptCode, sht)));
+        }
+      } catch { continue; }
+      allSigs.push({
+        index: allSigs.length, txid: tx.txid, inputIndex: i,
+        r: der.r, s: der.s, z,
+        pubkey: bytesToHex(pubBytes),
+        pubkeyHash: bytesToHex(pubHash),
+        address,
+      });
+    }
+  }
+  process.stdout.write("\r\x1b[K");
+  console.log(c(C.green, "Total signature dianalisis: " + allSigs.length));
+  if (opts.verbose) {
+    for (const s of allSigs) {
+      sep("tx " + s.txid.slice(0, 12) + "… vin#" + s.inputIndex);
+      console.log("R :", c(C.yellow, padHex(s.r)));
+      console.log("S :", c(C.yellow, padHex(s.s)));
+      console.log("Z :", c(C.yellow, padHex(s.z)));
+      console.log("Pubkey:", c(C.magenta, s.pubkey));
+    }
+  } else {
+    console.log(c(C.dim, "(gunakan --verbose untuk melihat tiap R/S/Z)"));
+  }
+  if (opts.out) {
+    const fs = await import("node:fs");
+    const out = allSigs.map((s) => ({
+      txid: s.txid, inputIndex: s.inputIndex,
+      r: padHex(s.r), s: padHex(s.s), z: padHex(s.z), pubkey: s.pubkey,
+    }));
+    fs.writeFileSync(opts.out, JSON.stringify(out, null, 2));
+    console.log(c(C.green, "Disimpan ke: " + opts.out));
+  }
+  detectReuse(allSigs);
+  return allSigs;
+}
+
+async function analyzeByTxid(txid, opts = {}) {
+  const base = opts.api || "https://blockstream.info/api";
+  const meta = await esploraFetch(base, "/tx/" + txid);
+  const hex = await esploraFetch(base, "/tx/" + txid + "/hex");
+  const amounts = {};
+  for (let i = 0; i < meta.vin.length; i++) {
+    if (meta.vin[i].prevout && meta.vin[i].prevout.value !== undefined) {
+      amounts[i] = meta.vin[i].prevout.value;
+    }
+  }
+  analyzeTx(hex.trim(), { amounts });
+}
+
+
+// ============================================================
 // CLI
 // ============================================================
 function help() {
@@ -610,15 +732,22 @@ ${c(C.bold, "btc-sig-analyzer")} — Penganalisis tanda tangan Bitcoin (CLI)
 Penggunaan:
   node index.mjs tx <hex>                Analisis raw transaksi (hex)
   node index.mjs tx-file <path>          Analisis raw transaksi dari file (hex)
+  node index.mjs txid <txid>             Ambil & analisis tx via TXID (online)
+  node index.mjs address <addr>          Scan SEMUA tx dari address (online)
+                                         ekstrak R/S/Z, cari R-reuse otomatis
   node index.mjs sig --r <hex> --s <hex> --z <hex> [--pub <hex>]
                                          Analisis satu signature manual
   node index.mjs reuse <file.json>       Cari R-reuse dari daftar signature JSON
                                          Format: [{r,s,z,pubkey?}, ...]
   node index.mjs help                    Tampilkan bantuan
 
-Opsi tambahan untuk 'tx':
-  --amount <i>=<satoshi>                 Nilai input ke-i (wajib untuk SegWit)
-                                         dapat diulang untuk beberapa input
+Opsi:
+  --amount <i>=<satoshi>                 Nilai input ke-i (untuk 'tx' SegWit)
+  --api <url>                            Endpoint Esplora kustom
+                                         (default https://blockstream.info/api)
+                                         testnet: https://blockstream.info/testnet/api
+  --verbose                              Tampilkan tiap R/S/Z saat scan address
+  --out <file.json>                      Simpan hasil scan ke file JSON
 
 Yang dianalisis dari setiap input:
   • R, S          (komponen ECDSA dari DER signature)
@@ -637,10 +766,25 @@ Pemulihan Private Key:
 
 const argv = process.argv.slice(2);
 const cmd = argv[0];
+const getOpt = (k) => {
+  const i = argv.indexOf("--" + k);
+  return i >= 0 ? argv[i + 1] : null;
+};
+const hasFlag = (k) => argv.includes("--" + k);
 
-try {
+async function main() {
   if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") {
     help();
+  } else if (cmd === "txid") {
+    if (!argv[1]) throw new Error("TXID wajib diisi");
+    await analyzeByTxid(argv[1], { api: getOpt("api") });
+  } else if (cmd === "address") {
+    if (!argv[1]) throw new Error("Address wajib diisi");
+    await analyzeAddress(argv[1], {
+      api: getOpt("api"),
+      verbose: hasFlag("verbose"),
+      out: getOpt("out"),
+    });
   } else if (cmd === "tx" || cmd === "tx-file") {
     const hex =
       cmd === "tx" ? argv[1] : readFileSync(argv[1], "utf8").trim();
@@ -678,7 +822,9 @@ try {
     help();
     process.exit(1);
   }
-} catch (e) {
+}
+
+main().catch((e) => {
   console.error(c(C.red, "Error: " + e.message));
   process.exit(1);
-}
+});
