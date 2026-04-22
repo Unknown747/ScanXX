@@ -2,7 +2,7 @@
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha256";
 import { ripemd160 } from "@noble/hashes/ripemd160";
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -507,8 +507,9 @@ function analyzeTx(rawHex, opts = {}) {
 // ============================================================
 // Deteksi R-reuse lintas signature
 // ============================================================
-function detectReuse(sigs) {
+function detectReuse(sigs, opts = {}) {
   sep("Deteksi R-reuse");
+  const hitsFile = opts.hitsFile || "hits.txt";
   const groups = new Map();
   for (const s of sigs) {
     const key = padHex(s.r);
@@ -516,6 +517,8 @@ function detectReuse(sigs) {
     groups.get(key).push(s);
   }
   let found = false;
+  let hitCount = 0;
+  const recovered = [];
   for (const [r, list] of groups) {
     if (list.length < 2) continue;
     found = true;
@@ -523,45 +526,94 @@ function detectReuse(sigs) {
     console.log("   Tanda tangan terkait:");
     for (const s of list) {
       console.log(
-        `   - input #${s.index}  pubkey ${s.pubkey.slice(0, 16)}…`
+        `   - input #${s.index}  tx ${s.txid ? s.txid.slice(0, 16) + "…" : "(manual)"}  pubkey ${s.pubkey.slice(0, 16)}…`
       );
     }
-    // Coba pulihkan
+    const seenPriv = new Set();
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
-        const a = list[i],
-          b = list[j];
+        const a = list[i], b = list[j];
         if (a.z === null || b.z === null) {
-          console.log(
-            c(
-              C.yellow,
-              "   (lewati: Z belum diketahui, sediakan --amount untuk segwit)"
-            )
-          );
+          console.log(c(C.yellow, "   (lewati: Z belum diketahui, sediakan --amount untuk segwit)"));
           continue;
         }
         const cands = recoverPrivateKey(a.r, a.s, a.z, b.s, b.z);
         for (const { k, d } of cands) {
-          // Verifikasi pubkey
           try {
-            const pub = secp256k1.getPublicKey(
-              hexToBytes(padHex(d)),
-              true
-            );
-            const pubHex = bytesToHex(pub);
-            if (pubHex === a.pubkey || pubHex === b.pubkey) {
+            const dHex = padHex(d);
+            if (seenPriv.has(dHex)) continue;
+            const pubCompressed = secp256k1.getPublicKey(hexToBytes(dHex), true);
+            const pubUncompressed = secp256k1.getPublicKey(hexToBytes(dHex), false);
+            const pubCHex = bytesToHex(pubCompressed);
+            const pubUHex = bytesToHex(pubUncompressed);
+            if (pubCHex === a.pubkey || pubUHex === a.pubkey ||
+                pubCHex === b.pubkey || pubUHex === b.pubkey) {
+              seenPriv.add(dHex);
+              hitCount++;
+              const matchedPub = (pubCHex === a.pubkey || pubCHex === b.pubkey) ? pubCHex : pubUHex;
+              const matchedBytes = (matchedPub === pubCHex) ? pubCompressed : pubUncompressed;
+              const addrCompressed = p2pkhAddress(hash160(pubCompressed));
+              const addrUncompressed = p2pkhAddress(hash160(pubUncompressed));
+              const wifC = toWIF(d, 0x80, true);
+              const wifU = toWIF(d, 0x80, false);
               console.log(c(C.green, "\n   ✓ PRIVATE KEY DIPULIHKAN"));
-              console.log("     k (nonce) :", c(C.magenta, padHex(k)));
-              console.log("     d (priv)  :", c(C.green + C.bold, padHex(d)));
-              console.log("     WIF       :", c(C.green, toWIF(d)));
-              console.log("     Pubkey    :", pubHex);
+              console.log("     k (nonce)         :", c(C.magenta, padHex(k)));
+              console.log("     d (priv hex)      :", c(C.green + C.bold, dHex));
+              console.log("     WIF (compressed)  :", c(C.green, wifC));
+              console.log("     WIF (uncompressed):", c(C.green, wifU));
+              console.log("     Pubkey cocok      :", matchedPub);
+              console.log("     Address (comp)    :", c(C.green + C.bold, addrCompressed));
+              console.log("     Address (uncomp)  :", c(C.green + C.bold, addrUncompressed));
+
+              recovered.push({
+                ts: new Date().toISOString(),
+                scannedAddress: opts.scannedAddress || null,
+                privHex: dHex,
+                wifCompressed: wifC,
+                wifUncompressed: wifU,
+                pubkey: matchedPub,
+                addressCompressed: addrCompressed,
+                addressUncompressed: addrUncompressed,
+                r: padHex(a.r),
+                txids: [a.txid, b.txid].filter(Boolean),
+                inputs: [a.index, b.index],
+              });
             }
           } catch {}
         }
       }
     }
   }
-  if (!found) console.log(c(C.green, "Tidak ada R-reuse terdeteksi."));
+  if (!found) {
+    console.log(c(C.green, "Tidak ada R-reuse terdeteksi."));
+    return [];
+  }
+  if (recovered.length && opts.saveHits !== false) {
+    try {
+      const lines = [];
+      for (const h of recovered) {
+        lines.push("==========================================================");
+        lines.push("Waktu              : " + h.ts);
+        if (h.scannedAddress) lines.push("Address yang di-scan: " + h.scannedAddress);
+        lines.push("Private key (hex)  : " + h.privHex);
+        lines.push("WIF (compressed)   : " + h.wifCompressed);
+        lines.push("WIF (uncompressed) : " + h.wifUncompressed);
+        lines.push("Public key         : " + h.pubkey);
+        lines.push("Address compressed : " + h.addressCompressed);
+        lines.push("Address uncompress : " + h.addressUncompressed);
+        lines.push("R reuse value      : " + h.r);
+        lines.push("TXID terkait       : " + h.txids.join(", "));
+        lines.push("");
+      }
+      appendFileSync(hitsFile, lines.join("\n"));
+      const jsonFile = hitsFile.replace(/\.txt$/, "") + ".jsonl";
+      appendFileSync(jsonFile, recovered.map((h) => JSON.stringify(h)).join("\n") + "\n");
+      console.log(c(C.green + C.bold, "\n>> " + recovered.length + " hit disimpan ke: " + hitsFile + " (dan " + jsonFile + ")"));
+    } catch (e) {
+      console.log(c(C.red, "Gagal menulis hits file: " + e.message));
+    }
+  }
+  return recovered;
 }
 
 // WIF (mainnet, compressed)
@@ -785,7 +837,11 @@ async function analyzeAddress(address, opts) {
     fs.writeFileSync(opts.out, JSON.stringify(out, null, 2));
     console.log(c(C.green, "Disimpan ke: " + opts.out));
   }
-  detectReuse(allSigs);
+  detectReuse(allSigs, {
+    scannedAddress: address,
+    hitsFile: opts.hitsFile || "hits.txt",
+    saveHits: opts.saveHits !== false,
+  });
   return allSigs;
 }
 
@@ -831,6 +887,7 @@ Opsi:
   --verbose                              Tampilkan tiap R/S/Z saat scan address
   --out <file.json>                      Simpan hasil scan ke file JSON
   --concurrency <n>                      Request paralel saat scan address (default 8)
+  --hits <file.txt>                      File untuk simpan hit R-reuse (default hits.txt)
 
 Yang dianalisis dari setiap input:
   • R, S          (komponen ECDSA dari DER signature)
@@ -881,13 +938,15 @@ async function interactiveMenu() {
       const apiIn = (await ask("API endpoint        [" + DEFAULT_API + "]: ")).trim();
       const conIn = (await ask("Paralel request     [8]: ")).trim();
       const verIn = (await ask("Verbose tampilkan tiap signature? (y/N): ")).trim().toLowerCase();
-      const outIn = (await ask("Simpan ke file JSON [kosong = tidak]: ")).trim();
+      const outIn = (await ask("Simpan semua signature ke file JSON [kosong = tidak]: ")).trim();
+      const hitsIn = (await ask("File untuk simpan hit R-reuse [hits.txt]: ")).trim();
       rl.close();
       await analyzeAddress(addr, {
         api: apiIn || DEFAULT_API,
         concurrency: conIn ? Math.max(1, parseInt(conIn, 10)) : 8,
         verbose: verIn === "y" || verIn === "ya",
         out: outIn || null,
+        hitsFile: hitsIn || "hits.txt",
       });
     } else if (choice === "2") {
       const txid = (await ask("TXID                : ")).trim();
@@ -944,6 +1003,7 @@ async function main() {
       api: getOpt("api"),
       verbose: hasFlag("verbose"),
       out: getOpt("out"),
+      hitsFile: getOpt("hits") || "hits.txt",
       concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : 8,
     });
   } else if (cmd === "tx" || cmd === "tx-file") {
