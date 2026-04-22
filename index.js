@@ -627,63 +627,140 @@ async function fetchAllTxsForAddress(base, address) {
   return all;
 }
 
-async function analyzeAddress(address, opts = {}) {
+function drawProgress(done, total, startTs, label) {
+  if (label === undefined) label = "";
+  const w = 30;
+  const pct = total ? done / total : 0;
+  const filled = Math.round(pct * w);
+  const bar = "\u2588".repeat(filled) + "\u2591".repeat(w - filled);
+  const elapsed = (Date.now() - startTs) / 1000;
+  const rate = done / Math.max(elapsed, 0.001);
+  const eta = rate > 0 ? Math.max(0, (total - done) / rate) : 0;
+  const fmt = (s) => {
+    if (!isFinite(s)) return "--";
+    const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+    return m + "m" + String(sec).padStart(2, "0") + "s";
+  };
+  const line =
+    "\r" + c(C.cyan, bar) + " " +
+    c(C.bold, done + "/" + total) +
+    " (" + (pct * 100).toFixed(1) + "%)  " +
+    rate.toFixed(1) + "/dtk  ETA " + fmt(eta) +
+    (label ? "  " + c(C.dim, label) : "") +
+    "\x1b[K";
+  process.stdout.write(line);
+}
+
+async function processTxForAddress(tx, address, base) {
+  const ourInputs = [];
+  for (let i = 0; i < tx.vin.length; i++) {
+    if (tx.vin[i].prevout && tx.vin[i].prevout.scriptpubkey_address === address) ourInputs.push(i);
+  }
+  if (ourInputs.length === 0) return { sigs: [], err: null };
+  let hex;
+  try { hex = await esploraFetch(base, "/tx/" + tx.txid + "/hex"); }
+  catch (e) { return { sigs: [], err: "ambil " + tx.txid + ": " + e.message }; }
+  let parsed;
+  try { parsed = parseTx(hexToBytes(hex.trim())); }
+  catch (e) { return { sigs: [], err: "parse " + tx.txid + ": " + e.message }; }
+  const out = [];
+  for (const i of ourInputs) {
+    const vi = parsed.vin[i];
+    let pushes = parseScriptPushes(vi.scriptSig);
+    let isWitness = false;
+    if (pushes.length < 2 && vi.witness.length >= 2) { pushes = vi.witness; isWitness = true; }
+    if (pushes.length < 2) continue;
+    let der;
+    try { der = parseDER(pushes[0]); } catch { continue; }
+    const pubBytes = pushes[1];
+    const pubHash = hash160(pubBytes);
+    const sht = der.sighashType == null ? 1 : der.sighashType;
+    let z = null;
+    try {
+      const scriptCode = concat(new Uint8Array([0x76, 0xa9, 0x14]), pubHash, new Uint8Array([0x88, 0xac]));
+      if (isWitness) {
+        const amt = tx.vin[i].prevout && tx.vin[i].prevout.value;
+        if (amt === undefined) continue;
+        z = BigInt("0x" + bytesToHex(bip143Sighash(parsed, i, scriptCode, amt, sht)));
+      } else {
+        z = BigInt("0x" + bytesToHex(legacySighash(parsed, i, scriptCode, sht)));
+      }
+    } catch { continue; }
+    out.push({
+      txid: tx.txid, inputIndex: i,
+      r: der.r, s: der.s, z,
+      pubkey: bytesToHex(pubBytes),
+      pubkeyHash: bytesToHex(pubHash),
+      address,
+    });
+  }
+  return { sigs: out, err: null };
+}
+
+async function runWithConcurrency(items, limit, worker, onProgress) {
+  const results = new Array(items.length);
+  let next = 0;
+  let done = 0;
+  async function spawn() {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+      done++;
+      if (onProgress) onProgress(done, items[i]);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, spawn);
+  await Promise.all(workers);
+  return results;
+}
+
+async function analyzeAddress(address, opts) {
+  if (!opts) opts = {};
   const base = opts.api || "https://blockstream.info/api";
+  const concurrency = opts.concurrency || 8;
   console.log(c(C.bold, "\n=== Scan Address: " + address + " ==="));
-  console.log("Sumber API:", base);
-  process.stdout.write("Mengambil daftar transaksi… ");
+  console.log("Sumber API :", base);
+  console.log("Paralel    :", concurrency, "request");
+  process.stdout.write("Mengambil daftar transaksi\u2026 ");
   const txs = await fetchAllTxsForAddress(base, address);
   console.log(c(C.green, txs.length + " tx"));
 
+  if (txs.length === 0) {
+    console.log(c(C.yellow, "Tidak ada transaksi untuk address ini."));
+    return [];
+  }
+
+  const startTs = Date.now();
+  const errors = [];
   const allSigs = [];
-  let processed = 0;
-  for (const tx of txs) {
-    processed++;
-    process.stdout.write("\r[" + processed + "/" + txs.length + "] " + tx.txid.slice(0, 16) + "…  ");
-    const ourInputs = [];
-    for (let i = 0; i < tx.vin.length; i++) {
-      if (tx.vin[i].prevout && tx.vin[i].prevout.scriptpubkey_address === address) ourInputs.push(i);
-    }
-    if (ourInputs.length === 0) continue;
-    let hex;
-    try { hex = await esploraFetch(base, "/tx/" + tx.txid + "/hex"); }
-    catch (e) { console.log(c(C.red, "\n  Gagal ambil " + tx.txid + ": " + e.message)); continue; }
-    let parsed;
-    try { parsed = parseTx(hexToBytes(hex.trim())); }
-    catch (e) { console.log(c(C.red, "\n  Gagal parse " + tx.txid + ": " + e.message)); continue; }
-    for (const i of ourInputs) {
-      const vi = parsed.vin[i];
-      let pushes = parseScriptPushes(vi.scriptSig);
-      let isWitness = false;
-      if (pushes.length < 2 && vi.witness.length >= 2) { pushes = vi.witness; isWitness = true; }
-      if (pushes.length < 2) continue;
-      let der;
-      try { der = parseDER(pushes[0]); } catch { continue; }
-      const pubBytes = pushes[1];
-      const pubHash = hash160(pubBytes);
-      const sht = der.sighashType == null ? 1 : der.sighashType;
-      let z = null;
-      try {
-        const scriptCode = concat(new Uint8Array([0x76, 0xa9, 0x14]), pubHash, new Uint8Array([0x88, 0xac]));
-        if (isWitness) {
-          const amt = tx.vin[i].prevout && tx.vin[i].prevout.value;
-          if (amt === undefined) continue;
-          z = BigInt("0x" + bytesToHex(bip143Sighash(parsed, i, scriptCode, amt, sht)));
-        } else {
-          z = BigInt("0x" + bytesToHex(legacySighash(parsed, i, scriptCode, sht)));
-        }
-      } catch { continue; }
-      allSigs.push({
-        index: allSigs.length, txid: tx.txid, inputIndex: i,
-        r: der.r, s: der.s, z,
-        pubkey: bytesToHex(pubBytes),
-        pubkeyHash: bytesToHex(pubHash),
-        address,
-      });
+  drawProgress(0, txs.length, startTs);
+  const results = await runWithConcurrency(
+    txs,
+    concurrency,
+    (tx) => processTxForAddress(tx, address, base),
+    (done, tx) => drawProgress(done, txs.length, startTs, tx.txid.slice(0, 16) + "\u2026")
+  );
+  process.stdout.write("\r\x1b[K");
+  for (const r of results) {
+    if (r.err) errors.push(r.err);
+    for (const s of r.sigs) {
+      s.index = allSigs.length;
+      allSigs.push(s);
     }
   }
-  process.stdout.write("\r\x1b[K");
-  console.log(c(C.green, "Total signature dianalisis: " + allSigs.length));
+  const elapsed = ((Date.now() - startTs) / 1000).toFixed(1);
+  console.log(
+    c(C.green, "Selesai dalam " + elapsed + " dtk \u2014 ") +
+    c(C.bold, allSigs.length + " signature") +
+    " dari " + txs.length + " tx"
+  );
+  if (errors.length) {
+    console.log(c(C.yellow, errors.length + " error saat ambil/parse:"));
+    for (const e of errors.slice(0, 5)) console.log(c(C.dim, "  - " + e));
+    if (errors.length > 5) console.log(c(C.dim, "  \u2026 dan " + (errors.length - 5) + " lagi"));
+  }
+
   if (opts.verbose) {
     for (const s of allSigs) {
       sep("tx " + s.txid.slice(0, 12) + "… vin#" + s.inputIndex);
@@ -748,6 +825,7 @@ Opsi:
                                          testnet: https://blockstream.info/testnet/api
   --verbose                              Tampilkan tiap R/S/Z saat scan address
   --out <file.json>                      Simpan hasil scan ke file JSON
+  --concurrency <n>                      Request paralel saat scan address (default 8)
 
 Yang dianalisis dari setiap input:
   • R, S          (komponen ECDSA dari DER signature)
@@ -784,6 +862,7 @@ async function main() {
       api: getOpt("api"),
       verbose: hasFlag("verbose"),
       out: getOpt("out"),
+      concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : 8,
     });
   } else if (cmd === "tx" || cmd === "tx-file") {
     const hex =
