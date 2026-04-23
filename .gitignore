@@ -53,6 +53,7 @@ Thumbs.db
 hits.txt
 hits.jsonl
 hits_LIVE.txt
+scan.log
 
 # config pribadi (berisi token Telegram, dll)
 config.json

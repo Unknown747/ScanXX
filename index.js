@@ -14,6 +14,8 @@ const DEFAULT_CONFIG = {
   api: "https://mempool.space/api",
   concurrency: 8,
   hitsFile: "hits.txt",
+  logFile: "scan.log",
+  logEnabled: true,
   cache: { enabled: true, listMaxAgeHours: 6 },
   telegram: { enabled: false, botToken: "", chatId: "", notifyOnLiveOnly: true },
 };
@@ -33,6 +35,21 @@ function loadConfig() {
   }
 }
 const CONFIG = loadConfig();
+
+// ---- Persistent log file (timestamped) ----
+function _ts() {
+  const d = new Date();
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+    " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds()) +
+    "." + p(d.getMilliseconds(), 3);
+}
+function logScan(level, msg) {
+  if (!CONFIG.logEnabled || !CONFIG.logFile) return;
+  try {
+    appendFileSync(CONFIG.logFile, "[" + _ts() + "] [" + level + "] " + msg + "\n");
+  } catch {}
+}
 const DEFAULT_API = CONFIG.api;
 
 // ============================================================
@@ -737,6 +754,8 @@ async function detectReuse(sigs, opts = {}) {
                 c(C.dim, "Addr P2WPKH   ") + " " + c(C.green + C.bold, addrSegwit),
                 c(C.dim, "Addr P2SH-WPKH") + " " + c(C.green + C.bold, addrP2sh),
               ], C.green);
+              logScan("HIT", "private-key dipulihkan scanned=" + (opts.scannedAddress || "-") +
+                " priv=" + dHex + " p2pkhC=" + addrCompressed + " p2wpkh=" + addrSegwit);
 
               recovered.push({
                 ts: new Date().toISOString(),
@@ -1086,16 +1105,20 @@ async function esploraFetch(base, path) {
         const exp = Math.min(RETRY.maxDelayMs, RETRY.baseDelayMs * 2 ** (attempt - 1));
         waitMs = Math.floor(exp * (0.5 + Math.random() * 0.5)); // jitter
       }
+      logScan("RETRY", "HTTP " + r.status + " percobaan " + attempt + "/" + RETRY.maxAttempts + " tunggu " + waitMs + "ms · " + url);
       if (attempt < RETRY.maxAttempts) await sleep(waitMs);
     } catch (e) {
       // Network/timeout/abort: retry
       lastErr = e;
       if (attempt < RETRY.maxAttempts) {
         const exp = Math.min(RETRY.maxDelayMs, RETRY.baseDelayMs * 2 ** (attempt - 1));
-        await sleep(Math.floor(exp * (0.5 + Math.random() * 0.5)));
+        const waitMs = Math.floor(exp * (0.5 + Math.random() * 0.5));
+        logScan("RETRY", "network/timeout (" + (e.message || e) + ") percobaan " + attempt + "/" + RETRY.maxAttempts + " tunggu " + waitMs + "ms · " + url);
+        await sleep(waitMs);
       }
     }
   }
+  logScan("ERROR", "fetch gagal total setelah " + RETRY.maxAttempts + " percobaan · " + url + " · " + (lastErr && lastErr.message));
   throw lastErr || new Error("Gagal fetch setelah " + RETRY.maxAttempts + " percobaan: " + url);
 }
 
@@ -1247,6 +1270,7 @@ async function fetchAllTxsForAddress(base, address) {
       process.stdout.write("\n");
       console.log(c(C.yellow, "  ! Pagination berhenti di halaman " + page +
         " (" + e.message + "). Lanjut dengan " + all.length + " tx yang sudah didapat."));
+      logScan("WARN", "pagination[" + address + "] berhenti di halaman " + page + " sisa belum dimuat · " + e.message);
       break;
     }
     if (!Array.isArray(data) || data.length === 0) break;
@@ -1375,6 +1399,7 @@ async function analyzeAddress(address, opts) {
   const concurrency = opts.concurrency || 8;
   console.log();
   header("Scan Address Wallet", address);
+  logScan("SCAN", "mulai scan address=" + address + " concurrency=" + concurrency);
   kv("API", base, C.cyan);
   kv("Paralel", concurrency + " request", C.bold);
   kv("Cache", CACHE_ENABLED ? "AKTIF (.btc-cache/)" : "NONAKTIF",
@@ -1459,6 +1484,7 @@ async function analyzeAddress(address, opts) {
     " dari " + txs.length + " tx" +
     (remainingTxs.length < txs.length ? c(C.dim, " (" + (txs.length - remainingTxs.length) + " dilewati via resume)") : "")
   );
+  logScan("SCAN", "selesai address=" + address + " durasi=" + elapsed + "s sigs=" + allSigs.length + " tx=" + txs.length + " errors=" + errors.length);
   clearResume(address);
   if (CACHE_ENABLED) {
     const total = CACHE_STATS.hexHits + CACHE_STATS.hexMisses;
@@ -1619,6 +1645,8 @@ Konfigurasi (config.json di root, opsional):
     "api": "https://mempool.space/api",
     "concurrency": 8,
     "hitsFile": "hits.txt",
+    "logFile": "scan.log",
+    "logEnabled": true,
     "cache": { "enabled": true, "listMaxAgeHours": 6 },
     "telegram": {
       "enabled": true,
