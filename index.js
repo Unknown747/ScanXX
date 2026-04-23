@@ -1558,7 +1558,13 @@ async function interactiveMenu() {
   try {
     console.log();
     banner();
-    console.log(c(C.dim, "  Mode interaktif · pilih analisis di bawah\n"));
+    console.log(c(C.dim, "  Mode interaktif · pilih analisis di bawah"));
+    console.log(c(C.gray,
+      "  Config aktif: API=" + (CONFIG.api || DEFAULT_API) +
+      " · paralel=" + CONFIG.concurrency +
+      " · hits=" + CONFIG.hitsFile +
+      " · telegram=" + (CONFIG.telegram.enabled ? "ON" : "OFF") +
+      "  " + c(C.dim, "(ubah di config.json)") + "\n"));
     const item = (n, title, hint) =>
       console.log("  " + c(C.cyan + C.bold, n) + c(C.gray, " │ ") +
         c(C.bold, title.padEnd(26)) + c(C.dim, hint || ""));
@@ -1579,25 +1585,19 @@ async function interactiveMenu() {
     if (choice === "1") {
       const addr = (await ask("Address Bitcoin     : ")).trim();
       if (!addr) throw new Error("Address kosong");
-      const apiIn = (await ask("API endpoint        [" + DEFAULT_API + "]: ")).trim();
-      const conIn = (await ask("Paralel request     [8]: ")).trim();
-      const verIn = (await ask("Verbose tampilkan tiap signature? (y/N): ")).trim().toLowerCase();
-      const outIn = (await ask("Simpan semua signature ke file JSON [kosong = tidak]: ")).trim();
-      const hitsIn = (await ask("File untuk simpan hit R-reuse [hits.txt]: ")).trim();
       rl.close();
       await analyzeAddress(addr, {
-        api: apiIn || DEFAULT_API,
-        concurrency: conIn ? Math.max(1, parseInt(conIn, 10)) : CONFIG.concurrency,
-        verbose: verIn === "y" || verIn === "ya",
-        out: outIn || null,
-        hitsFile: hitsIn || CONFIG.hitsFile,
+        api: CONFIG.api || DEFAULT_API,
+        concurrency: CONFIG.concurrency,
+        verbose: !!CONFIG.verbose,
+        out: CONFIG.out || null,
+        hitsFile: CONFIG.hitsFile,
       });
     } else if (choice === "2") {
       const txid = (await ask("TXID                : ")).trim();
       if (!txid) throw new Error("TXID kosong");
-      const apiIn = (await ask("API endpoint        [" + DEFAULT_API + "]: ")).trim();
       rl.close();
-      await analyzeByTxid(txid, { api: apiIn || DEFAULT_API });
+      await analyzeByTxid(txid, { api: CONFIG.api || DEFAULT_API });
     } else if (choice === "3") {
       const hex = (await ask("Raw TX hex          : ")).trim();
       if (!hex) throw new Error("Hex kosong");
@@ -1630,15 +1630,12 @@ async function interactiveMenu() {
       }
     } else if (choice === "8") {
       const fpath = (await ask("Path file daftar address: ")).trim();
-      const apiIn = (await ask("API endpoint        [" + DEFAULT_API + "]: ")).trim();
-      const conIn = (await ask("Paralel request     [" + CONFIG.concurrency + "]: ")).trim();
-      const hitsIn = (await ask("File untuk simpan hit R-reuse [" + CONFIG.hitsFile + "]: ")).trim();
       rl.close();
       if (!fpath) throw new Error("Path file kosong");
       await batchAddresses(fpath, {
-        api: apiIn || DEFAULT_API,
-        concurrency: conIn ? Math.max(1, parseInt(conIn, 10)) : CONFIG.concurrency,
-        hitsFile: hitsIn || CONFIG.hitsFile,
+        api: CONFIG.api || DEFAULT_API,
+        concurrency: CONFIG.concurrency,
+        hitsFile: CONFIG.hitsFile,
       });
     } else {
       rl.close();
