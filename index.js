@@ -2,7 +2,7 @@
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha256";
 import { ripemd160 } from "@noble/hashes/ripemd160";
-import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -1147,6 +1147,39 @@ function saveAddressListCache(address, txs) {
   } catch {}
 }
 
+// ---- Resume state: simpan kemajuan agar scan terputus bisa dilanjut ----
+const CACHE_RESUME = CACHE_DIR + "/resume";
+function ensureResumeDir() {
+  ensureCacheDir();
+  if (!existsSync(CACHE_RESUME)) mkdirSync(CACHE_RESUME);
+}
+function resumeFilePath(address) { return CACHE_RESUME + "/" + address + ".json"; }
+function loadResume(address) {
+  const f = resumeFilePath(address);
+  if (!existsSync(f)) return null;
+  try {
+    const d = JSON.parse(readFileSync(f, "utf8"));
+    if (d && Array.isArray(d.processed) && Array.isArray(d.sigs)) return d;
+  } catch {}
+  return null;
+}
+function saveResume(address, processedTxids, sigs) {
+  try {
+    ensureResumeDir();
+    // Tulis atomik (write ke .tmp lalu rename) supaya tidak korup kalau ditekan Ctrl+C di tengah
+    const tmp = resumeFilePath(address) + ".tmp";
+    writeFileSync(tmp, JSON.stringify({
+      ts: Date.now(), address,
+      processed: Array.from(processedTxids),
+      sigs,
+    }));
+    renameSync(tmp, resumeFilePath(address));
+  } catch {}
+}
+function clearResume(address) {
+  try { const f = resumeFilePath(address); if (existsSync(f)) rmSync(f, { force: true }); } catch {}
+}
+
 // Ambil harga BTC/USD dari beberapa sumber publik (cache 10 menit)
 let _BTC_USD = { price: null, ts: 0 };
 async function fetchBtcUsdPrice() {
@@ -1366,33 +1399,67 @@ async function analyzeAddress(address, opts) {
 
   if (txs.length === 0) {
     console.log(c(C.yellow, "Tidak ada transaksi untuk address ini."));
+    clearResume(address);
     return [];
+  }
+
+  // ---- Resume: lewati tx yang sudah diproses pada run sebelumnya ----
+  const resume = opts.noResume ? null : loadResume(address);
+  const processedSet = new Set(resume ? resume.processed : []);
+  const allSigs = resume ? resume.sigs.slice() : [];
+  if (resume) {
+    const knownTxids = new Set(txs.map((t) => t.txid));
+    // Buang processed yang sudah tidak ada di daftar tx baru (mis. reorg) supaya tetap konsisten
+    for (const id of Array.from(processedSet)) if (!knownTxids.has(id)) processedSet.delete(id);
+  }
+  const remainingTxs = txs.filter((t) => !processedSet.has(t.txid));
+  if (resume && processedSet.size > 0) {
+    console.log(c(C.cyan,
+      "Resume        : melanjutkan dari " + processedSet.size + "/" + txs.length +
+      " tx (sisa " + remainingTxs.length + ", " + allSigs.length + " sig sudah terkumpul)"));
+  }
+
+  if (remainingTxs.length === 0) {
+    console.log(c(C.green, "Semua tx sudah pernah diproses (dari resume)."));
   }
 
   const startTs = Date.now();
   const errors = [];
-  const allSigs = [];
-  drawProgress(0, txs.length, startTs);
-  const results = await runWithConcurrency(
-    txs,
+  let saveCounter = 0;
+  const SAVE_EVERY = 25;
+
+  drawProgress(0, remainingTxs.length, startTs);
+  await runWithConcurrency(
+    remainingTxs,
     concurrency,
-    (tx) => processTxForAddress(tx, address, base),
-    (done, tx) => drawProgress(done, txs.length, startTs, tx.txid.slice(0, 16) + "\u2026")
+    async (tx) => {
+      const r = await processTxForAddress(tx, address, base);
+      // Akumulasi langsung supaya resume mencerminkan kondisi terkini
+      if (r.err) errors.push(r.err);
+      for (const s of r.sigs) { s.index = allSigs.length; allSigs.push(s); }
+      processedSet.add(tx.txid);
+      return r;
+    },
+    (done, tx) => {
+      saveCounter++;
+      if (saveCounter >= SAVE_EVERY || done === remainingTxs.length) {
+        saveCounter = 0;
+        saveResume(address, processedSet, allSigs);
+      }
+      drawProgress(done, remainingTxs.length, startTs, tx.txid.slice(0, 16) + "\u2026");
+    }
   );
   process.stdout.write("\r\x1b[K");
-  for (const r of results) {
-    if (r.err) errors.push(r.err);
-    for (const s of r.sigs) {
-      s.index = allSigs.length;
-      allSigs.push(s);
-    }
-  }
+  // Final save lalu hapus state karena sudah selesai sukses
+  saveResume(address, processedSet, allSigs);
   const elapsed = ((Date.now() - startTs) / 1000).toFixed(1);
   console.log(
     c(C.green, "Selesai dalam " + elapsed + " dtk \u2014 ") +
     c(C.bold, allSigs.length + " signature") +
-    " dari " + txs.length + " tx"
+    " dari " + txs.length + " tx" +
+    (remainingTxs.length < txs.length ? c(C.dim, " (" + (txs.length - remainingTxs.length) + " dilewati via resume)") : "")
   );
+  clearResume(address);
   if (CACHE_ENABLED) {
     const total = CACHE_STATS.hexHits + CACHE_STATS.hexMisses;
     const pct = total ? ((CACHE_STATS.hexHits / total) * 100).toFixed(1) : "0";
