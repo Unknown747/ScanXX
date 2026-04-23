@@ -1044,28 +1044,38 @@ async function analyzeManual(items) {
 // Esplora API client
 // ============================================================
 const RETRY = {
-  maxAttempts: (CONFIG.retry && CONFIG.retry.maxAttempts) || 6,
+  maxAttempts: (CONFIG.retry && CONFIG.retry.maxAttempts) || 8,
   baseDelayMs: (CONFIG.retry && CONFIG.retry.baseDelayMs) || 500,
-  maxDelayMs: (CONFIG.retry && CONFIG.retry.maxDelayMs) || 15000,
+  maxDelayMs: (CONFIG.retry && CONFIG.retry.maxDelayMs) || 30000,
+  timeoutMs: (CONFIG.retry && CONFIG.retry.timeoutMs) || 30000,
 };
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+// Fetch dengan timeout (AbortController) supaya koneksi hang tidak menggantung selamanya.
+async function fetchWithTimeout(url, opts = {}, timeoutMs = RETRY.timeoutMs) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(new Error("timeout " + timeoutMs + "ms")), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 async function esploraFetch(base, path) {
   const url = base + path;
   let lastErr;
   for (let attempt = 1; attempt <= RETRY.maxAttempts; attempt++) {
     try {
-      const r = await fetch(url);
+      const r = await fetchWithTimeout(url, { headers: { "user-agent": "btc-sig-analyzer/1.0" } });
       if (r.ok) {
         const ct = r.headers.get("content-type") || "";
         return ct.includes("json") ? await r.json() : await r.text();
       }
-      // Hanya retry untuk 429 dan 5xx
-      if (r.status !== 429 && r.status < 500) {
-        throw new Error("HTTP " + r.status + " " + url);
-      }
+      // 404 nyata (tx tidak ada) — jangan retry
+      if (r.status === 404) throw new Error("HTTP 404 " + url);
+      // Selain 404, retry untuk semua error (termasuk 4xx transient seperti 429, dan 5xx)
       lastErr = new Error("HTTP " + r.status + " " + url);
-      // Hormati header Retry-After bila ada
       const ra = r.headers.get("retry-after");
       let waitMs;
       if (ra) {
@@ -1078,8 +1088,8 @@ async function esploraFetch(base, path) {
       }
       if (attempt < RETRY.maxAttempts) await sleep(waitMs);
     } catch (e) {
+      // Network/timeout/abort: retry
       lastErr = e;
-      // Error jaringan: retry juga
       if (attempt < RETRY.maxAttempts) {
         const exp = Math.min(RETRY.maxDelayMs, RETRY.baseDelayMs * 2 ** (attempt - 1));
         await sleep(Math.floor(exp * (0.5 + Math.random() * 0.5)));
@@ -1187,17 +1197,45 @@ function formatBTC(sats) {
 
 async function fetchAllTxsForAddress(base, address) {
   const all = [];
+  const seen = new Set();
   let lastSeen = null;
+  let page = 0;
+  // Halaman pertama kembalikan up to 50 (mempool + chain). Halaman /chain/ kembalikan up to 25.
   while (true) {
+    page++;
     const path = lastSeen
       ? "/address/" + address + "/txs/chain/" + lastSeen
       : "/address/" + address + "/txs";
-    const page = await esploraFetch(base, path);
-    if (!Array.isArray(page) || page.length === 0) break;
-    all.push(...page);
-    if (page.length < 25) break;
-    lastSeen = page[page.length - 1].txid;
+    let data;
+    try {
+      data = await esploraFetch(base, path);
+    } catch (e) {
+      // Pagination gagal setelah retry penuh: hentikan dengan peringatan, jangan buang data sebelumnya.
+      process.stdout.write("\n");
+      console.log(c(C.yellow, "  ! Pagination berhenti di halaman " + page +
+        " (" + e.message + "). Lanjut dengan " + all.length + " tx yang sudah didapat."));
+      break;
+    }
+    if (!Array.isArray(data) || data.length === 0) break;
+    let added = 0;
+    for (const tx of data) {
+      if (tx && tx.txid && !seen.has(tx.txid)) {
+        seen.add(tx.txid);
+        all.push(tx);
+        added++;
+      }
+    }
+    process.stdout.write("\r" + c(C.dim, "  paginasi: " + all.length + " tx dimuat (halaman " + page + ")") + "\x1b[K");
+    // Halaman /chain/ punya batas 25 per halaman.
+    // Kalau halaman tidak menambah tx baru (mis. server kembalikan duplikat), berhenti agar tidak loop.
+    if (added === 0) break;
+    // Stop bila halaman ini lebih kecil dari batas chain (25)
+    if (lastSeen && data.length < 25) break;
+    lastSeen = data[data.length - 1].txid;
+    // Jeda kecil antar halaman supaya tidak memicu rate-limit
+    await sleep(120);
   }
+  process.stdout.write("\n");
   return all;
 }
 
@@ -1283,9 +1321,14 @@ async function runWithConcurrency(items, limit, worker, onProgress) {
     while (true) {
       const i = next++;
       if (i >= items.length) return;
-      results[i] = await worker(items[i], i);
+      try {
+        results[i] = await worker(items[i], i);
+      } catch (e) {
+        // Jangan biarkan satu tx error membunuh seluruh scan.
+        results[i] = { sigs: [], err: "worker: " + (e && e.message ? e.message : String(e)) };
+      }
       done++;
-      if (onProgress) onProgress(done, items[i]);
+      try { if (onProgress) onProgress(done, items[i]); } catch {}
     }
   }
   const workers = Array.from({ length: Math.min(limit, items.length) }, spawn);
@@ -1713,7 +1756,16 @@ async function main() {
   }
 }
 
+// Handler global supaya script tidak diam-diam mati karena promise/exception tak tertangani.
+process.on("unhandledRejection", (reason) => {
+  const msg = reason && reason.message ? reason.message : String(reason);
+  console.error("\n" + c(C.red, "[unhandledRejection] " + msg));
+});
+process.on("uncaughtException", (e) => {
+  console.error("\n" + c(C.red, "[uncaughtException] " + (e && e.message ? e.message : String(e))));
+});
+
 main().catch((e) => {
-  console.error(c(C.red, "Error: " + e.message));
+  console.error(c(C.red, "Error: " + (e && e.message ? e.message : String(e))));
   process.exit(1);
 });
