@@ -47,7 +47,7 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - Banner: kotak `╔═╗` double-line
 - `header(title, sub)` — header kotak per sub-command
 - `sep(label)` — separator baris tipis `┄`
-- `kv(key, val, color)` — baris dot-leader `  Key ··· Value`
+- `kv(key, val, color)` — baris dot-leader `  Key ··· Value` (label dipad ke 11 char)
 - `box(title, lines, color)` — kotak notifikasi
 - ICON set: scan, search, ok, err, key, info, btc, alert, dll
 

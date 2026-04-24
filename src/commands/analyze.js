@@ -25,32 +25,32 @@ export async function analyzeTx(rawHex, opts = {}) {
   for (let i = 0; i < tx.vin.length; i++) {
     const vi = tx.vin[i];
     sep(`Input #${i}`);
-    console.log("Prev TXID :", c(C.cyan, bytesToHex(reverseBytes(vi.prevTxid))));
-    console.log("Prev Vout :", vi.prevVout);
+    kv("Prev TXID", bytesToHex(reverseBytes(vi.prevTxid)), C.cyan);
+    kv("Prev Vout", vi.prevVout);
 
     let pushes = parseScriptPushes(vi.scriptSig);
     let isWitness = false;
     if (pushes.length < 2 && vi.witness.length >= 2) { pushes = vi.witness; isWitness = true; }
     if (pushes.length < 2) {
-      console.log(c(C.yellow, "  (Tidak ada signature+pubkey yang dapat dibaca otomatis pada input ini)"));
+      console.log("  " + c(C.yellow, "(Tidak ada signature+pubkey yang dapat dibaca otomatis)"));
       continue;
     }
     const sigBytes = pushes[0];
     const pubBytes = pushes[1];
     let parsed;
     try { parsed = parseDER(sigBytes); }
-    catch (e) { console.log(c(C.red, "  Gagal parse DER: " + e.message)); continue; }
+    catch (e) { console.log("  " + c(C.red, "Gagal parse DER: " + e.message)); continue; }
     const pubHash = hash160(pubBytes);
     const addr = p2pkhAddress(pubHash);
 
-    console.log("Tipe       :", isWitness ? "P2WPKH (witness)" : "P2PKH/legacy (scriptSig)");
-    console.log("Public Key :", c(C.magenta, bytesToHex(pubBytes)));
-    console.log("PubKey Hash:", c(C.magenta, bytesToHex(pubHash)));
-    console.log("Address    :", c(C.green, addr));
-    console.log("Signature  :", c(C.dim, bytesToHex(sigBytes)));
-    console.log("  R        :", c(C.yellow, padHex(parsed.r)));
-    console.log("  S        :", c(C.yellow, padHex(parsed.s)));
-    console.log("  Sighash  :", "0x" + (parsed.sighashType ?? 1).toString(16).padStart(2, "0"));
+    kv("Tipe",       isWitness ? "P2WPKH (witness)" : "P2PKH/legacy (scriptSig)");
+    kv("Public Key", bytesToHex(pubBytes), C.magenta);
+    kv("PubKey Hash", bytesToHex(pubHash), C.magenta);
+    kv("Address",    addr, C.green);
+    kv("Signature",  bytesToHex(sigBytes), C.dim);
+    kv("R",          padHex(parsed.r), C.yellow);
+    kv("S",          padHex(parsed.s), C.yellow);
+    kv("Sighash",    "0x" + (parsed.sighashType ?? 1).toString(16).padStart(2, "0"));
 
     let z = null;
     try {
@@ -59,19 +59,19 @@ export async function analyzeTx(rawHex, opts = {}) {
       if (isWitness) {
         const amount = opts.amounts?.[i];
         if (amount === undefined) {
-          console.log(c(C.yellow, "  Z        : (perlu --amount " + i + "=<satoshi> untuk hitung sighash BIP143)"));
+          kv("Z", "(perlu --amount " + i + "=<satoshi> untuk sighash BIP143)", C.yellow);
         } else {
           const h = bip143Sighash(tx, i, scriptCode, amount, sht);
           z = bytesToBigInt(h);
-          console.log("  Z (msg)  :", c(C.yellow, bytesToHex(h)));
+          kv("Z (msg)", bytesToHex(h), C.yellow);
         }
       } else {
         const h = legacySighash(tx, i, scriptCode, sht);
         z = bytesToBigInt(h);
-        console.log("  Z (msg)  :", c(C.yellow, bytesToHex(h)));
+        kv("Z (msg)", bytesToHex(h), C.yellow);
       }
     } catch (e) {
-      console.log(c(C.red, "  Gagal hitung Z: " + e.message));
+      console.log("  " + c(C.red, "Gagal hitung Z: " + e.message));
     }
 
     sigs.push({

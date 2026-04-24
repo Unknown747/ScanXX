@@ -102,8 +102,8 @@ export function header(title, subtitle) {
 }
 
 export function kv(label, value, color) {
-  const LAB = 16;
-  const lab = label.padEnd(LAB);
+  const LAB = 11;
+  const lab = label.length >= LAB ? label : label.padEnd(LAB);
   const dots = c(C.gray, " ··· ");
   const val = color ? c(color, String(value)) : c(C.white, String(value));
   console.log(c(C.gray, "  ") + c(C.dim, lab) + dots + val);
