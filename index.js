@@ -505,8 +505,59 @@ const useColor = !process.env.NO_COLOR && (process.stdout.isTTY || !!process.env
 const c = (col, s) => (useColor ? col + s + C.reset : s);
 const W = 74;
 
-// ---- Helper: panjang string tanpa escape warna ----
-const visLen = (s) => s.replace(/\x1b\[[0-9;]*m/g, "").length;
+// ---- Helper: panjang string tanpa escape warna (akurat lebar terminal) ----
+const isWideCodePoint = (cp) => {
+  // CJK & fullwidth blocks
+  if (
+    (cp >= 0x1100 && cp <= 0x115F) ||
+    (cp >= 0x2E80 && cp <= 0x303E) ||
+    (cp >= 0x3041 && cp <= 0x33FF) ||
+    (cp >= 0x3400 && cp <= 0x4DBF) ||
+    (cp >= 0x4E00 && cp <= 0x9FFF) ||
+    (cp >= 0xA000 && cp <= 0xA4CF) ||
+    (cp >= 0xAC00 && cp <= 0xD7A3) ||
+    (cp >= 0xF900 && cp <= 0xFAFF) ||
+    (cp >= 0xFE30 && cp <= 0xFE4F) ||
+    (cp >= 0xFF00 && cp <= 0xFF60) ||
+    (cp >= 0xFFE0 && cp <= 0xFFE6)
+  ) return true;
+  // Emoji-presentation characters di BMP (default wide di terminal modern)
+  if (
+    (cp >= 0x231A && cp <= 0x231B) ||
+    (cp >= 0x23E9 && cp <= 0x23EC) || cp === 0x23F0 || cp === 0x23F3 ||
+    (cp >= 0x25FD && cp <= 0x25FE) ||
+    (cp >= 0x2614 && cp <= 0x2615) ||
+    (cp >= 0x2648 && cp <= 0x2653) ||
+    cp === 0x267F || cp === 0x2693 ||
+    cp === 0x26A1 ||                                  // ⚡
+    (cp >= 0x26AA && cp <= 0x26AB) ||
+    (cp >= 0x26BD && cp <= 0x26BE) ||
+    (cp >= 0x26C4 && cp <= 0x26C5) ||
+    cp === 0x26CE || cp === 0x26D4 || cp === 0x26EA ||
+    (cp >= 0x26F2 && cp <= 0x26F3) || cp === 0x26F5 || cp === 0x26FA || cp === 0x26FD ||
+    cp === 0x2705 || (cp >= 0x270A && cp <= 0x270B) ||
+    cp === 0x2728 || cp === 0x274C || cp === 0x274E ||
+    (cp >= 0x2753 && cp <= 0x2755) || cp === 0x2757 ||
+    (cp >= 0x2795 && cp <= 0x2797) || cp === 0x27B0 || cp === 0x27BF ||
+    (cp >= 0x2B1B && cp <= 0x2B1C) || cp === 0x2B50 || cp === 0x2B55
+  ) return true;
+  // Semua emoji & pictograph di Supplementary Multilingual Plane (1F000-1FFFF)
+  if (cp >= 0x1F000 && cp <= 0x1FFFF) return true;
+  return false;
+};
+const visLen = (s) => {
+  const stripped = s.replace(/\x1b\[[0-9;]*m/g, "");
+  let width = 0;
+  for (const ch of stripped) {
+    const cp = ch.codePointAt(0);
+    if (cp === 0xFE0F || cp === 0xFE0E) continue;            // Variation Selectors
+    if (cp === 0x200D) continue;                              // Zero-Width Joiner
+    if (cp >= 0x0300 && cp <= 0x036F) continue;               // combining marks
+    if (cp >= 0xFE00 && cp <= 0xFE0F) continue;
+    width += isWideCodePoint(cp) ? 2 : 1;
+  }
+  return width;
+};
 
 // ---- Separator ----
 const sep = (t = "") => {
@@ -1848,15 +1899,15 @@ function help() {
   sect("PERINTAH");
   row("node index.js",                           "Mode interaktif (menu)");
   row("node index.js txid <txid>",               "Ambil & analisis tx via TXID");
-  row("node index.js address <addr>",            "Scan semua tx dari wallet, cari R-reuse");
+  row("node index.js address <addr>",            "Scan semua tx wallet, cek R-reuse");
   row("node index.js batch <file>",              "Scan banyak address dari file");
   row("node index.js explore",                   "Scan tx langsung dari explorer");
   sub("--mode mempool|blocks    --limit <n>  (default: mempool, 100 tx)");
-  row("node index.js daemon",                    "Scan otomatis loop (alert jika R-reuse)");
+  row("node index.js daemon",                    "Scan otomatis loop (alert R-reuse)");
   sub("--mode mempool|blocks  --interval <dtk>  --limit <n/siklus>");
   row("node index.js tx <hex>",                  "Analisis raw hex transaksi");
   row("node index.js tx-file <path>",            "Analisis raw hex dari file");
-  row("node index.js sig --r <h> --s <h> --z <h>", "Analisis 1 signature manual");
+  row("node index.js sig --r --s --z [--pub]",   "Analisis 1 signature manual");
   row("node index.js reuse <file.json>",         "R-reuse dari [{r,s,z,pubkey?}]");
   row("node index.js stats [logfile]",           "Ringkasan scan.log");
   sub("--date YYYY-MM-DD   (filter tanggal)");
@@ -1954,9 +2005,9 @@ async function interactiveMenu() {
     const menuItem = (n, icon, title, hint) => {
       const inner = GW - 2;
       const left  = " " + c(C.yellow + C.bold, n) + "  " + icon + "  " + c(C.bold + C.white, title);
-      const right = c(C.dim, hint);
-      const used  = 1 + visLen(n) + 2 + visLen(icon) + 2 + visLen(title) + visLen(hint);
-      const gap   = Math.max(1, inner - used - 1);
+      const right = hint ? c(C.dim, hint) + " " : "";
+      const used  = 1 + visLen(n) + 2 + visLen(icon) + 2 + visLen(title) + (hint ? visLen(hint) + 1 : 0);
+      const gap   = Math.max(1, inner - used);
       console.log(c(C.gray, "  │") + left + " ".repeat(gap) + right + c(C.gray, "│"));
     };
 
