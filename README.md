@@ -76,7 +76,7 @@ Tidak ada dependency lain. Tidak ada native binary.
 ## Instalasi
 
 ```bash
-git clone https://github.com/<user>/btc-sig-analyzer.git
+git clone https://github.com/Unknown747/btc-sig-analyzer.git
 cd btc-sig-analyzer
 npm install
 ```
