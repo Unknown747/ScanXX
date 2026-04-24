@@ -4,7 +4,10 @@
   "endpoints": [
     "https://mempool.space/api",
     "https://blockstream.info/api",
-    "https://mempool.emzy.de/api"
+    "https://mempool.emzy.de/api",
+    "https://mempool.bitcoin-21.org/api",
+    "https://btcscan.org/api",
+    "https://bitcoin.lu.ke/api"
   ],
   "endpointDefaults": true,
 
