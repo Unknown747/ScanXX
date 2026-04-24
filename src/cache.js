@@ -73,7 +73,7 @@ export function ensureCacheDir() {
 // ============================================================
 // Hits append stream (hindari appendFileSync di hot path)
 // ============================================================
-export const _hitsStreams = new Map();
+const _hitsStreams = new Map();
 
 export function appendHit(path, text) {
   let s = _hitsStreams.get(path);

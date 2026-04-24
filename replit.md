@@ -163,6 +163,17 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - **`subItem(text, color)`**: indented bullet `›` konsisten dengan `kv()` col-2.
 - Konsistensi: semua raw `console.log("Daftar tx :", …)` di `address.js` & `explore.js` dikonversi ke `kv()` / `statusLine()` / `subItem()`.
 
+## Cleanup & README sync (round-18)
+- **Dead-code removal**: hapus `ICON.bolt/dot/bullet/pipe` di `src/ui.js` (tidak pernah dipakai — `subItem`/`statusLine` pakai literal Unicode langsung). ICON sekarang hanya 12 entry yang benar-benar dipakai.
+- **`_hitsStreams` di-private**: drop `export` (hanya internal `appendHit`/`closeAllHitsStreams` yang menyentuh — tidak ada konsumer luar).
+- **Konsolidasi pool helper menu**: `printPoolMini()` di `src/commands/menu.js` di-rewrite agar pakai `compactPoolBadge()` dari `src/endpoints.js` — satu sumber kebenaran untuk format pool, hilangkan duplikasi 6 baris loop manual. `endpointBadge()` rename ke `poolHeaderBadge()` (lebih jelas, masih lokal).
+- **README rewrite**: ganti README lama (yang masih merefer "16 optimasi" + lupakan multi-endpoint) dengan dokumentasi lengkap section baru:
+  - **Multi-Endpoint Pool & Strategi** (3 strategi + cooldown + `endpoints --test` output sample)
+  - **Tampilan Terminal** (smooth bar 8-step, status line, spinner Braille, compact pool badge)
+  - Tabel CLI lengkap (`endpoints` command + flag `--strategy`, `--endpoints`)
+  - `config.json` reference disinkronkan dengan `config.example.json` aktual (endpoints, endpointStrategy, latencyProbe, cooldown, latencyBucketMs)
+  - Daemon section diperluas: indicator `[ws]`, sub-channel WS, watchlist `[WATCHLIST!]` tag
+
 ## Roadmap
 - Dukungan Taproot (BIP-341)
 - Cek saldo segwit `bc1q...` di daemon hit

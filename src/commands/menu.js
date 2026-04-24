@@ -3,14 +3,14 @@ import { createInterface } from "node:readline/promises";
 import { CONFIG, DEFAULT_API, CACHE_ENABLED } from "../config.js";
 import { c, C, ICON, W, banner, visLen } from "../ui.js";
 import { CACHE_DIR } from "../cache.js";
-import { getPool } from "../endpoints.js";
+import { getPool, compactPoolBadge } from "../endpoints.js";
 import { analyzeTx, analyzeManual, analyzeByTxid } from "./analyze.js";
 import { analyzeAddress, batchAddresses } from "./address.js";
 import { scanExplore } from "./explore.js";
 import { runDaemon } from "./daemon.js";
 import { help } from "./help.js";
 
-function endpointBadge() {
+function poolHeaderBadge() {
   const pool = getPool(CONFIG.api || DEFAULT_API);
   const sum = pool.summary();
   const color = sum.active === sum.total ? C.green : (sum.active > 0 ? C.yellow : C.red);
@@ -19,15 +19,9 @@ function endpointBadge() {
 
 function printPoolMini() {
   const pool = getPool(CONFIG.api || DEFAULT_API);
-  const eps = pool.list();
-  console.log(c(C.dim, "  Pool endpoint aktif (rotasi otomatis):"));
-  for (const ep of eps) {
-    const now = Date.now();
-    const ready = ep.cooldownUntil <= now;
-    const badge = ready ? c(C.green, "●") : c(C.red, "●");
-    const cd = ready ? "" : c(C.dim, " (cooldown " + Math.ceil((ep.cooldownUntil - now) / 1000) + "s)");
-    console.log("    " + badge + " " + c(C.cyan, ep.url) + cd);
-  }
+  const { badge, top } = compactPoolBadge(pool);
+  console.log("  " + badge);
+  if (top) console.log("    " + c(C.gray, "› ") + c(C.dim, top));
   console.log();
 }
 
@@ -44,7 +38,7 @@ export async function interactiveMenu() {
     console.log(c(C.gray, "  ") +
       c(C.dim, "API ") + c(C.cyan, api) +
       c(C.gray, "  ·  ") +
-      endpointBadge() +
+      poolHeaderBadge() +
       c(C.gray, "  ·  ") +
       c(C.dim, "paralel ") + c(C.white, String(CONFIG.concurrency)) +
       c(C.gray, "  ·  ") +

@@ -140,10 +140,6 @@ export const ICON = {
   search: useColor ? "\x1b[36m⌕\x1b[0m"  : "[?]",
   file:   useColor ? "\x1b[35m◈\x1b[0m"  : "[F]",
   tool:   useColor ? "\x1b[90m◆\x1b[0m"  : "[T]",
-  bolt:   useColor ? "\x1b[33m⚡\x1b[0m" : "[!]",
-  dot:    useColor ? "\x1b[90m·\x1b[0m"  : ".",
-  bullet: useColor ? "\x1b[90m›\x1b[0m"  : ">",
-  pipe:   useColor ? "\x1b[90m│\x1b[0m"  : "|",
 };
 
 // Spinner (Braille) untuk status berjalan
