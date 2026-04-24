@@ -2014,9 +2014,9 @@ async function interactiveMenu() {
     menuTop("SCAN ONLINE");
     menuItem("1", ICON.scan,   "Scan Address",    "Semua tx dari 1 wallet, cari R-reuse");
     menuItem("2", ICON.search, "Analisis TXID",   "1 transaksi via TXID");
+    menuItem("8", ICON.file,   "Batch Scan File", "Daftar address, 1 per baris");
     menuItem("9", ICON.btc,    "Scan Explorer",   "Langsung dari mempool / blok terbaru");
     menuItem("D", "⚡",        "Daemon Auto-Scan","Loop terus, alert real-time jika hit");
-    menuItem("8", ICON.file,   "Batch Scan File", "Daftar address, 1 per baris");
     menuBot();
 
     console.log();
