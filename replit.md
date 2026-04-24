@@ -20,14 +20,15 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - TTL daftar tx address di cache: 6 jam; cache hex tx: permanen (tx final)
 
 ## Perintah utama
-- `node index.js` — menu interaktif
+- `node index.js` — menu interaktif (pilihan 0-9)
 - `node index.js txid <txid>`
 - `node index.js address <addr> [--concurrency N]`
 - `node index.js tx <hex>` / `tx-file <path>` (`--amount i=sats` untuk SegWit)
 - `node index.js sig --r --s --z [--pub]`
 - `node index.js reuse <file.json>`
+- `node index.js explore [--mode mempool|blocks] [--limit N]` — scan tx langsung dari explorer
 - `node index.js clear-cache`
-- Flag global: `--api`, `--out`, `--hits`, `--verbose`, `--no-cache`
+- Flag global: `--api`, `--out`, `--hits`, `--verbose`, `--no-cache`, `--limit`, `--mode`
 
 ## Konfigurasi
 - `config.json` (opsional, di .gitignore) menyimpan: `api`, `concurrency`,

@@ -1592,6 +1592,176 @@ async function batchAddresses(filePath, opts = {}) {
   }
 }
 
+// ============================================================
+// Scan Explorer: ambil tx langsung dari mempool/blok terbaru
+// ============================================================
+async function processTxAllInputs(tx, base) {
+  let hex;
+  try { hex = await fetchTxHexCached(base, tx.txid); }
+  catch (e) { return { sigs: [], err: "ambil " + tx.txid + ": " + e.message }; }
+  let parsed;
+  try { parsed = parseTx(hexToBytes(hex.trim())); }
+  catch (e) { return { sigs: [], err: "parse " + tx.txid + ": " + e.message }; }
+  const out = [];
+  for (let i = 0; i < parsed.vin.length; i++) {
+    const vi = parsed.vin[i];
+    let pushes = parseScriptPushes(vi.scriptSig);
+    let isWitness = false;
+    if (pushes.length < 2 && vi.witness.length >= 2) { pushes = vi.witness; isWitness = true; }
+    if (pushes.length < 2) continue;
+    let der;
+    try { der = parseDER(pushes[0]); } catch { continue; }
+    const pubBytes = pushes[1];
+    const pubHash = hash160(pubBytes);
+    const address = p2pkhAddress(pubHash);
+    const sht = der.sighashType == null ? 1 : der.sighashType;
+    let z = null;
+    try {
+      const scriptCode = concat(new Uint8Array([0x76, 0xa9, 0x14]), pubHash, new Uint8Array([0x88, 0xac]));
+      if (isWitness) {
+        const amt = tx.vin && tx.vin[i] && tx.vin[i].prevout && tx.vin[i].prevout.value;
+        if (amt == null) continue;
+        z = BigInt("0x" + bytesToHex(bip143Sighash(parsed, i, scriptCode, amt, sht)));
+      } else {
+        z = BigInt("0x" + bytesToHex(legacySighash(parsed, i, scriptCode, sht)));
+      }
+    } catch { continue; }
+    out.push({
+      txid: tx.txid, inputIndex: i,
+      r: der.r, s: der.s, z,
+      pubkey: bytesToHex(pubBytes),
+      pubkeyHash: bytesToHex(pubHash),
+      address,
+    });
+  }
+  return { sigs: out, err: null };
+}
+
+async function scanExplore(opts = {}) {
+  const base = opts.api || DEFAULT_API;
+  const mode = opts.mode || "mempool";
+  const limit = opts.limit || 100;
+  const concurrency = opts.concurrency || CONFIG.concurrency;
+
+  console.log();
+  header(
+    "Scan Explorer",
+    (mode === "mempool" ? "Mempool live" : "Blok terbaru") +
+    " · max " + limit + " tx · " + base
+  );
+  kv("Mode", mode === "mempool" ? "Mempool (unconfirmed)" : "Blok terbaru", C.cyan);
+  kv("Maks TX", limit, C.bold);
+  kv("Paralel", concurrency + " request", C.bold);
+  kv("API", base, C.dim);
+
+  let txids = [];
+
+  if (mode === "mempool") {
+    process.stdout.write(c(C.dim, "Mengambil TXID dari mempool… "));
+    try {
+      const all = await esploraFetch(base, "/mempool/txids");
+      txids = Array.isArray(all) ? all.slice(0, limit) : [];
+      console.log(c(C.green, txids.length + " txid dari mempool"));
+    } catch (e) {
+      console.log(c(C.red, "Gagal ambil mempool txids: " + e.message));
+      return;
+    }
+  } else {
+    process.stdout.write(c(C.dim, "Mengambil info blok terbaru… "));
+    try {
+      const blocks = await esploraFetch(base, "/blocks");
+      console.log(c(C.green, blocks.length + " blok"));
+      for (const blk of blocks) {
+        if (txids.length >= limit) break;
+        process.stdout.write(c(C.dim, "  Blok #" + blk.height + " (" + blk.id.slice(0, 12) + "…) → "));
+        try {
+          const tids = await esploraFetch(base, "/block/" + blk.id + "/txids");
+          const take = tids.slice(0, limit - txids.length);
+          txids.push(...take);
+          console.log(c(C.dim, take.length + " tx"));
+        } catch (e) {
+          console.log(c(C.yellow, "skip: " + e.message));
+        }
+      }
+    } catch (e) {
+      console.log(c(C.red, "Gagal ambil blok: " + e.message));
+      return;
+    }
+  }
+
+  if (txids.length === 0) {
+    console.log(c(C.yellow, "Tidak ada txid yang ditemukan."));
+    return;
+  }
+  console.log(c(C.bold, "Total " + txids.length + " TXID akan dianalisis."));
+
+  // Ambil metadata (butuh prevout.value untuk sighash SegWit)
+  console.log();
+  sep("Tahap 1/2 · Ambil metadata transaksi");
+  const txMetas = [];
+  const metaErrors = [];
+  const startMeta = Date.now();
+  await runWithConcurrency(
+    txids,
+    concurrency,
+    async (txid) => {
+      try {
+        const meta = await esploraFetch(base, "/tx/" + txid);
+        txMetas.push(meta);
+      } catch (e) {
+        metaErrors.push(txid.slice(0, 12) + "…: " + e.message);
+      }
+    },
+    (done) => drawProgress(done, txids.length, startMeta, "metadata")
+  );
+  process.stdout.write("\r\x1b[K");
+  console.log(
+    c(C.green, "  " + txMetas.length + " metadata OK") +
+    (metaErrors.length ? c(C.yellow, "  " + metaErrors.length + " gagal") : "")
+  );
+
+  // Ekstrak signature dari semua input setiap tx
+  console.log();
+  sep("Tahap 2/2 · Ekstrak R/S/Z dari setiap input");
+  const allSigs = [];
+  const errors = [];
+  const startTs = Date.now();
+  drawProgress(0, txMetas.length, startTs);
+  await runWithConcurrency(
+    txMetas,
+    concurrency,
+    async (tx) => {
+      const r = await processTxAllInputs(tx, base);
+      if (r.err) errors.push(r.err);
+      for (const s of r.sigs) { s.index = allSigs.length; allSigs.push(s); }
+      return r;
+    },
+    (done, tx) => drawProgress(done, txMetas.length, startTs, tx.txid.slice(0, 16) + "…")
+  );
+  process.stdout.write("\r\x1b[K");
+  const elapsed = ((Date.now() - startTs) / 1000).toFixed(1);
+  console.log(
+    c(C.green, "  Selesai " + elapsed + " dtk — ") +
+    c(C.bold, allSigs.length + " signature") +
+    c(C.gray, " dari " + txMetas.length + " tx")
+  );
+  if (errors.length) {
+    console.log(c(C.yellow, "  " + errors.length + " error:"));
+    for (const e of errors.slice(0, 5)) console.log(c(C.dim, "    - " + e));
+    if (errors.length > 5) console.log(c(C.dim, "    … dan " + (errors.length - 5) + " lagi"));
+  }
+  if (allSigs.length < 2) {
+    console.log(c(C.yellow, "Signature terlalu sedikit untuk deteksi R-reuse."));
+    return;
+  }
+  await detectReuse(allSigs, {
+    hitsFile: opts.hitsFile || CONFIG.hitsFile,
+    saveHits: true,
+    checkBalance: true,
+    api: base,
+  });
+}
+
 async function analyzeByTxid(txid, opts = {}) {
   const base = opts.api || DEFAULT_API;
   const meta = await esploraFetch(base, "/tx/" + txid);
@@ -1622,6 +1792,10 @@ ${c(C.bold + C.cyan, "PENGGUNAAN")}
                                          ekstrak R/S/Z, cari R-reuse otomatis
   node index.js batch <file>            Scan banyak address dari file (1 baris = 1 addr,
                                          baris '#' diabaikan sebagai komentar)
+  node index.js explore                 Scan tx LANGSUNG dari explorer tanpa input manual
+                                         --mode mempool   ambil tx dari mempool (default)
+                                         --mode blocks    ambil tx dari blok terbaru
+                                         --limit <n>      maks jumlah tx (default 100)
   node index.js stats [logfile]         Ringkasan dari scan.log (jumlah scan, hit,
                                          retry, error, top sumber retry/error)
                                          opsi: --date YYYY-MM-DD (filter tanggal)
@@ -1676,7 +1850,7 @@ Pemulihan Private Key:
 }
 
 const rawArgv = process.argv.slice(2);
-const FLAG_KEYS_WITH_VALUE = new Set(["api", "out", "hits", "concurrency", "amount"]);
+const FLAG_KEYS_WITH_VALUE = new Set(["api", "out", "hits", "concurrency", "amount", "mode", "limit", "date"]);
 const posArgs = [];
 for (let i = 0; i < rawArgv.length; i++) {
   const a = rawArgv[i];
@@ -1717,9 +1891,10 @@ async function interactiveMenu() {
     item("6", "Bantuan lengkap",     "tampilkan dokumentasi");
     item("7", "Hapus cache",         ".btc-cache/");
     item("8", "Batch scan file",     "daftar address, 1 per baris");
+    item("9", "Scan Explorer",       "scan tx langsung dari mempool/blok terbaru");
     item("0", "Keluar",              "");
     console.log();
-    const choice = (await ask(c(C.cyan + C.bold, "  " + ICON.arrow + " Pilihan [0-8]: "))).trim();
+    const choice = (await ask(c(C.cyan + C.bold, "  " + ICON.arrow + " Pilihan [0-9]: "))).trim();
 
     if (choice === "0" || choice === "") { rl.close(); return; }
 
@@ -1777,6 +1952,23 @@ async function interactiveMenu() {
         api: CONFIG.api || DEFAULT_API,
         concurrency: CONFIG.concurrency,
         hitsFile: CONFIG.hitsFile,
+      });
+    } else if (choice === "9") {
+      console.log();
+      console.log(c(C.dim, "  Sumber data:"));
+      console.log("  " + c(C.cyan + C.bold, "1") + c(C.gray, " │ ") + "Mempool (transaksi belum terkonfirmasi)");
+      console.log("  " + c(C.cyan + C.bold, "2") + c(C.gray, " │ ") + "Blok terbaru (transaksi sudah terkonfirmasi)");
+      const src = (await ask(c(C.cyan + C.bold, "  " + ICON.arrow + " Pilih sumber [1/2, default 1]: "))).trim() || "1";
+      const mode = src === "2" ? "blocks" : "mempool";
+      const limitStr = (await ask("  Jumlah maks TX yang di-scan [default 100]: ")).trim();
+      const limit = limitStr ? Math.max(1, parseInt(limitStr, 10) || 100) : 100;
+      rl.close();
+      await scanExplore({
+        api: CONFIG.api || DEFAULT_API,
+        concurrency: CONFIG.concurrency,
+        hitsFile: CONFIG.hitsFile,
+        mode,
+        limit,
       });
     } else {
       rl.close();
@@ -1962,6 +2154,16 @@ async function main() {
       api: getOpt("api"),
       verbose: hasFlag("verbose"),
       out: getOpt("out"),
+      hitsFile: getOpt("hits") || CONFIG.hitsFile,
+      concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
+    });
+  } else if (cmd === "explore") {
+    const mode = getOpt("mode") || "mempool";
+    const limitVal = getOpt("limit");
+    await scanExplore({
+      api: getOpt("api") || CONFIG.api,
+      mode: (mode === "blocks" || mode === "blok") ? "blocks" : "mempool",
+      limit: limitVal ? Math.max(1, parseInt(limitVal, 10)) : 100,
       hitsFile: getOpt("hits") || CONFIG.hitsFile,
       concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
     });
