@@ -2,6 +2,7 @@ import { Agent, setGlobalDispatcher } from "undici";
 import { CONFIG } from "./config.js";
 import { logScan } from "./log.js";
 import { profStart, profEnd } from "./profile.js";
+import { getPool } from "./endpoints.js";
 
 setGlobalDispatcher(new Agent({
   connections: 32,
@@ -73,9 +74,23 @@ export async function fetchWithTimeout(url, opts = {}, timeoutMs = RETRY.timeout
 }
 
 export async function esploraFetch(base, path) {
-  const url = base + path;
+  const pool = getPool(base);
   let lastErr;
+  let lastUrl = base + path;
+  let notFoundCount = 0;
+  const totalEndpoints = pool.size();
+
   for (let attempt = 1; attempt <= RETRY.maxAttempts; attempt++) {
+    let ep = pool.pick();
+    if (!ep) {
+      const wait = Math.max(500, Math.min(RETRY.maxDelayMs, pool.nextAvailableInMs()));
+      logScan("RETRY", "semua endpoint cooldown, tunggu " + wait + "ms (percobaan " + attempt + "/" + RETRY.maxAttempts + ")");
+      await sleep(wait);
+      ep = pool.pick();
+      if (!ep) { lastErr = new Error("semua endpoint dalam cooldown"); continue; }
+    }
+    const url = ep.url + path;
+    lastUrl = url;
     try {
       await rateLimitWait(url);
       _bumpReq();
@@ -83,33 +98,33 @@ export async function esploraFetch(base, path) {
       const r = await fetchWithTimeout(url, { headers: { "user-agent": "btc-sig-analyzer/1.0" } });
       profEnd("http");
       if (r.ok) {
+        pool.markOk(ep, r.status);
         const ct = r.headers.get("content-type") || "";
         return ct.includes("json") ? await r.json() : await r.text();
       }
-      if (r.status === 404) throw new Error("HTTP 404 " + url);
+      if (r.status === 404) {
+        notFoundCount++;
+        if (notFoundCount >= Math.min(2, totalEndpoints)) {
+          throw new Error("HTTP 404 " + url);
+        }
+        logScan("RETRY", "HTTP 404 di " + ep.url + ", coba mirror lain");
+        continue;
+      }
       lastErr = new Error("HTTP " + r.status + " " + url);
+      pool.markFail(ep, "HTTP " + r.status, r.status);
       const ra = r.headers.get("retry-after");
-      let waitMs;
       if (ra) {
         const sec = parseFloat(ra);
-        waitMs = isFinite(sec) ? Math.min(RETRY.maxDelayMs, sec * 1000) : null;
+        if (isFinite(sec)) pool.setCooldownFromRetryAfter(ep, sec);
       }
-      if (waitMs == null) {
-        const exp = Math.min(RETRY.maxDelayMs, RETRY.baseDelayMs * 2 ** (attempt - 1));
-        waitMs = Math.floor(exp * (0.5 + Math.random() * 0.5));
-      }
-      logScan("RETRY", "HTTP " + r.status + " percobaan " + attempt + "/" + RETRY.maxAttempts + " tunggu " + waitMs + "ms · " + url);
-      if (attempt < RETRY.maxAttempts) await sleep(waitMs);
+      logScan("RETRY", "HTTP " + r.status + " ep=" + ep.url + " percobaan " + attempt + "/" + RETRY.maxAttempts + " (rotate)");
     } catch (e) {
+      if (e && e.message && e.message.startsWith("HTTP 404")) throw e;
       lastErr = e;
-      if (attempt < RETRY.maxAttempts) {
-        const exp = Math.min(RETRY.maxDelayMs, RETRY.baseDelayMs * 2 ** (attempt - 1));
-        const waitMs = Math.floor(exp * (0.5 + Math.random() * 0.5));
-        logScan("RETRY", "network/timeout (" + (e.message || e) + ") percobaan " + attempt + "/" + RETRY.maxAttempts + " tunggu " + waitMs + "ms · " + url);
-        await sleep(waitMs);
-      }
+      pool.markFail(ep, e.message || String(e), 0);
+      logScan("RETRY", "network/timeout (" + (e.message || e) + ") ep=" + ep.url + " percobaan " + attempt + "/" + RETRY.maxAttempts + " (rotate)");
     }
   }
-  logScan("ERROR", "fetch gagal total setelah " + RETRY.maxAttempts + " percobaan · " + url + " · " + (lastErr && lastErr.message));
-  throw lastErr || new Error("Gagal fetch setelah " + RETRY.maxAttempts + " percobaan: " + url);
+  logScan("ERROR", "fetch gagal total setelah " + RETRY.maxAttempts + " percobaan · " + lastUrl + " · " + (lastErr && lastErr.message));
+  throw lastErr || new Error("Gagal fetch setelah " + RETRY.maxAttempts + " percobaan: " + lastUrl);
 }

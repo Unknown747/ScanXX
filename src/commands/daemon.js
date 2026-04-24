@@ -6,6 +6,7 @@ import { c, C, ICON, banner, header, kv, sep, box } from "../ui.js";
 import { p2pkhAddress, p2wpkhAddress, toWIF } from "../address.js";
 import { recoverPrivateKey } from "../ecdsa.js";
 import { esploraFetch, sleep, REQ_STATS, reqRatePerSec } from "../net.js";
+import { getPool } from "../endpoints.js";
 import { logScan } from "../log.js";
 import { notifyTelegram } from "../telegram.js";
 import {
@@ -303,11 +304,14 @@ export async function runDaemon(opts = {}) {
 
     const memMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(0);
     const rps = reqRatePerSec().toFixed(1);
+    const epPool = getPool(base);
+    const epSum = epPool.summary();
     console.log(c(C.gray,
       "    Total: siklus=" + cycle + "  tx=" + totalTx +
       "  sig=" + totalSigs + "  hit=" + totalHits +
       "  pool=" + sigPool.length + "  seen=" + seenTxids.size +
-      "  mem=" + memMB + "MB  req/s=" + rps
+      "  mem=" + memMB + "MB  req/s=" + rps +
+      "  ep=" + epSum.active + "/" + epSum.total
     ));
 
     // --- Top-3 R yang paling sering muncul (trending nonce) ---

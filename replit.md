@@ -21,7 +21,8 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
   - `sighash.js` — `legacySighash`, `bip143Context`, `bip143Sighash`
   - `address.js` — `base58Encode`, `bech32Encode`, `p2pkhAddress`, `p2wpkhAddress`, `p2shP2wpkhAddress`, `toWIF`
   - `ecdsa.js` — `recoverPrivateKey(r,s1,z1,s2,z2)`
-  - `net.js` — undici Agent global, `esploraFetch`, `fetchWithTimeout`, `rateLimitWait`, `REQ_STATS`, `reqRatePerSec`, `RETRY`, `sleep`
+  - `net.js` — undici Agent global, `esploraFetch` (multi-endpoint rotation + failover), `fetchWithTimeout`, `rateLimitWait`, `REQ_STATS`, `reqRatePerSec`, `RETRY`, `sleep`
+  - `endpoints.js` — `EndpointPool` (rotation, cooldown exponential per-endpoint, health stats), `getPool(primary)` singleton, `setExtraEndpoints(list)`, `printPoolReport(pool)`. Default mirrors: mempool.space, blockstream.info, mempool.emzy.de
   - `telegram.js` — `notifyTelegram(text)`
   - `price.js` — `fetchBtcUsdPrice`, `formatBTC`, `formatUSD`, `fetchAddressBalance`
   - `cache.js` — `LRUSet` (+`toArray()`), `LRUMap`, `CACHE_DIR`, `SEEN_FILE`, daily NDJSON shards dengan **lazy load** (`fetchTxHexCached`, `pruneOldCache`, `_listShards`, `_loadShard`, legacy `.hex` migration+delete), `RECENT_SHARDS` window, address-list cache, resume state, watchlist, `appendHit` **WriteStream** + `closeAllHitsStreams`, `CACHE_STATS`
@@ -32,6 +33,7 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
   - `explore.js` — `scanExplore` (single-pipeline)
   - `daemon.js` — `runDaemon` (loop + WS)
   - `stats.js` — `showStats` (parse `scan.log`)
+  - `endpoints.js` — `showEndpoints` (lihat status pool, opsional `--test` ping tiap endpoint)
   - `help.js` — `help()` banner
   - `menu.js` — `interactiveMenu()`
 - `package.json` — `@noble/curves ^1.6.0`, `@noble/hashes ^1.5.0`, `undici`, `ws`, ESM type module

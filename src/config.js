@@ -4,6 +4,9 @@ export const CONFIG_FILE = "config.json";
 
 const DEFAULT_CONFIG = {
   api: "https://mempool.space/api",
+  endpoints: [],
+  endpointDefaults: true,
+  cooldown: { baseMs: 5000, maxMs: 300000 },
   concurrency: 8,
   hitsFile: "hits.txt",
   logFile: "scan.log",
@@ -38,6 +41,8 @@ function loadConfig() {
     return {
       ...DEFAULT_CONFIG,
       ...raw,
+      endpoints: Array.isArray(raw.endpoints) ? raw.endpoints : DEFAULT_CONFIG.endpoints,
+      cooldown: { ...DEFAULT_CONFIG.cooldown, ...(raw.cooldown || {}) },
       cache: { ...DEFAULT_CONFIG.cache, ...(raw.cache || {}) },
       explore: { ...DEFAULT_CONFIG.explore, ...(raw.explore || {}) },
       daemon: { ...DEFAULT_CONFIG.daemon, ...(raw.daemon || {}) },

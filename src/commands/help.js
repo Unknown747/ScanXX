@@ -40,11 +40,14 @@ export function help() {
   row("node index.js reuse <file.json>",         "R-reuse dari [{r,s,z,pubkey?}]");
   row("node index.js stats [logfile]",           "Ringkasan scan.log");
   sub("--date YYYY-MM-DD   (filter tanggal)");
+  row("node index.js endpoints",                 "Lihat status pool endpoint (rotasi)");
+  sub("--test   (uji koneksi tiap endpoint)");
   row("node index.js help",                      "Tampilkan bantuan ini");
   sectEnd();
 
   sect("OPSI GLOBAL");
-  flag("--api <url>",         "Endpoint Esplora kustom (default: mempool.space)");
+  flag("--api <url>",         "Endpoint Esplora utama (default: mempool.space)");
+  flag("--endpoints \"u1,u2\"", "Tambah endpoint mirror (rotasi otomatis + failover)");
   flag("--concurrency <n>",   "Request paralel saat scan address (default: 8)");
   flag("--hits <file.txt>",   "File simpan hit R-reuse (default: hits.txt)");
   flag("--out <file.json>",   "Simpan hasil scan ke JSON");

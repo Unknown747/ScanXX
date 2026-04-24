@@ -11,11 +11,13 @@ import { analyzeAddress, batchAddresses } from "./src/commands/address.js";
 import { scanExplore } from "./src/commands/explore.js";
 import { runDaemon } from "./src/commands/daemon.js";
 import { showStats } from "./src/commands/stats.js";
+import { showEndpoints } from "./src/commands/endpoints.js";
+import { setExtraEndpoints } from "./src/endpoints.js";
 
 const rawArgv = process.argv.slice(2);
 const FLAG_KEYS_WITH_VALUE = new Set([
   "api", "out", "hits", "concurrency", "amount",
-  "mode", "limit", "date", "interval",
+  "mode", "limit", "date", "interval", "endpoints", "watch",
 ]);
 const posArgs = [];
 for (let i = 0; i < rawArgv.length; i++) {
@@ -36,6 +38,11 @@ const hasFlag = (k) => rawArgv.includes("--" + k);
 async function main() {
   if (hasFlag("no-cache")) setCacheEnabled(false);
   if (hasFlag("profile")) PROFILE.enabled = true;
+  const epFlag = getOpt("endpoints");
+  if (epFlag) {
+    const list = epFlag.split(",").map((s) => s.trim()).filter(Boolean);
+    if (list.length > 0) setExtraEndpoints(list);
+  }
   if (cmd === "clear-cache") {
     if (existsSync(CACHE_DIR)) {
       rmSync(CACHE_DIR, { recursive: true, force: true });
@@ -92,6 +99,8 @@ async function main() {
     await analyzeManual(data);
   } else if (cmd === "stats") {
     showStats(posArgs[1] || CONFIG.logFile, getOpt("date"));
+  } else if (cmd === "endpoints") {
+    await showEndpoints({ api: getOpt("api"), test: hasFlag("test") });
   } else if (cmd === "batch") {
     if (!posArgs[1]) throw new Error("Path file daftar address wajib diisi");
     await batchAddresses(posArgs[1], {
