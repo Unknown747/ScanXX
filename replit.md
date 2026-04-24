@@ -14,7 +14,7 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
   - `config.js` — load `config.json`, `CACHE_ENABLED` live binding + `setCacheEnabled()`
   - `log.js` — `logScan(level, msg)` ke `scan.log`
   - `bytes.js` — `hexToBytes`, `bytesToHex`, `padHex`, `concat`, `reverseBytes`, `u32le`, `u64le`, dll
-  - `hash.js` — re-export `secp256k1`, `sha256d`, `hash160`
+  - `hash.js` — re-export `secp256k1`, `sha256d`, `hash160`, `pubkeysFromPriv(dHex)` (single scalar mult via ProjectivePoint, dipakai analysis.js + daemon.js)
   - `ui.js` — palette `C`, `ICON`, `banner`, `header`, `kv`, `sep`, `box`, `drawProgress`, `visLen`, `W`
   - `profile.js` — `PROFILE.enabled`, `profStart/End/Report`
   - `tx.js` — `parseDER`, `parseScriptPushes`, `readVarInt/writeVarInt`, `parseTx`
@@ -24,8 +24,8 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
   - `net.js` — undici Agent global, `esploraFetch`, `fetchWithTimeout`, `rateLimitWait`, `REQ_STATS`, `reqRatePerSec`, `RETRY`, `sleep`
   - `telegram.js` — `notifyTelegram(text)`
   - `price.js` — `fetchBtcUsdPrice`, `formatBTC`, `formatUSD`, `fetchAddressBalance`
-  - `cache.js` — `LRUSet`, `LRUMap`, `CACHE_DIR`, `SEEN_FILE`, daily NDJSON cache (`fetchTxHexCached`, `pruneOldCache`, `_buildTxIndex`), address-list cache, resume state, watchlist, `appendHit` stream, `CACHE_STATS`, `_hitsStreams`
-  - `analysis.js` — `detectReuse`, `processTxForAddress`, `processTxAllInputs`, `runWithConcurrency`, `fetchAllTxsForAddress`
+  - `cache.js` — `LRUSet` (+`toArray()`), `LRUMap`, `CACHE_DIR`, `SEEN_FILE`, daily NDJSON shards dengan **lazy load** (`fetchTxHexCached`, `pruneOldCache`, `_listShards`, `_loadShard`, legacy `.hex` migration+delete), `RECENT_SHARDS` window, address-list cache, resume state, watchlist, `appendHit` **WriteStream** + `closeAllHitsStreams`, `CACHE_STATS`
+  - `analysis.js` — `detectReuse`, `processTxInputs` (shared core), `processTxForAddress`/`processTxAllInputs` (thin wrappers), `runWithConcurrency`, `fetchAllTxsForAddress`, internal `formatHitText`, `buildScriptCodeP2PKH`
 - `src/commands/` — handler per sub-command
   - `analyze.js` — `analyzeTx`, `analyzeManual`, `analyzeByTxid`
   - `address.js` — `analyzeAddress`, `batchAddresses`
@@ -129,6 +129,24 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
   `telegram.{enabled, botToken, chatId, notifyOnLiveOnly}`.
 - File watchlist: 1 address per baris, baris kosong & `# komentar` diabaikan.
 - Telegram `notifyTelegram()` dipanggil saat ada hit R-reuse.
+
+## Optimasi terbaru (round-16)
+1. **Single scalar mult**: `pubkeysFromPriv()` di hash.js — 1× ProjectivePoint untuk dua format pubkey (compressed + uncompressed) di tiap hit (sebelumnya 2× scalar mult).
+2. **rIndex incremental** di daemon: `Map<rHex, sig[]>` di-maintain sinkron dengan sigPool; saat detect cycle, hanya iterasi R yang baru muncul siklus ini (`checkedR`) — bukan O(pool²) lagi.
+3. **freshTxidSet hoisted**: dibangun 1× per siklus, dipakai oleh banyak group fetch (sebelumnya rebuild per group).
+4. **/mempool/recent endpoint** saat `--realtime`: hanya tarik tx baru ~10 menit terakhir, bukan full mempool list.
+5. **processTxInputs** shared core: `processTxForAddress` & `processTxAllInputs` jadi thin wrapper (dedup parser + sighash logic).
+6. **formatHitText** helper: format hits.txt terpusat — dipakai analysis.js & daemon.js (sebelumnya 2 copy).
+7. **appendHit pakai WriteStream**: tidak `appendFileSync` lagi — non-blocking, auto-batch via stream buffer; `closeAllHitsStreams` saat exit/SIGINT.
+8. **Promise.allSettled** di telegram batch: kegagalan 1 channel tidak gagalkan yang lain.
+9. **Lazy shard loading** (`RECENT_SHARDS`): index di-build hanya untuk N shard terbaru (= ceil(txMaxAgeHours/24)+1), shard lama di-load on-demand saat cache miss.
+10. **Removed sleep(120)** di akhir scan address — tidak ada gunanya, hanya delay total runtime.
+11. **buildScriptCodeP2PKH**: pre-alloc Uint8Array(25) langsung (bukan concat 5 chunk).
+12. **Legacy .hex migration+delete**: scan folder lama 1×, masukkan ke shard NDJSON, hapus setelah migrate.
+13. **Removed redundant `seen` Set** di scanExplore — `uniqueTxids` sudah dedupe.
+14. **ws.on("error")** di daemon: log WARN ke scan.log, tidak silent.
+15. **runWithConcurrency** cleaner: tidak return wrapper `{sigs,err}` (langsung throw), kode pemanggil lebih ringkas.
+16. **LRUSet.toArray()**: snapshot daemon-seen.json pakai 1 method, bukan iterasi manual.
 
 ## Roadmap
 - Dukungan Taproot (BIP-341)

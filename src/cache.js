@@ -19,6 +19,7 @@ export class LRUSet {
       if (!it.done) this.m.delete(it.value);
     }
   }
+  toArray() { return Array.from(this.m.keys()); }
   get size() { return this.m.size; }
 }
 
@@ -48,14 +49,12 @@ export class LRUMap {
 // Paths
 // ============================================================
 export const CACHE_DIR     = ".btc-cache";
-export const CACHE_TX      = CACHE_DIR + "/tx";
+export const CACHE_TX      = CACHE_DIR + "/tx";       // legacy (akan dimigrasikan)
 export const CACHE_TX_DAILY = CACHE_DIR + "/tx-daily";
 export const CACHE_LIST    = CACHE_DIR + "/addr";
 export const CACHE_RESUME  = CACHE_DIR + "/resume";
 export const SEEN_FILE     = CACHE_DIR + "/daemon-seen.json";
 
-// CACHE_STATS is a stable object reference — mutate fields, don't reassign,
-// supaya importer lain melihat update lewat live binding.
 export const CACHE_STATS = { hexHits: 0, hexMisses: 0, listHits: 0, listMisses: 0 };
 
 export function resetCacheStats() {
@@ -72,7 +71,7 @@ export function ensureCacheDir() {
 }
 
 // ============================================================
-// Hits append stream (hindari appendFileSync di hot path daemon)
+// Hits append stream (hindari appendFileSync di hot path)
 // ============================================================
 export const _hitsStreams = new Map();
 
@@ -89,6 +88,7 @@ export function closeAllHitsStreams() {
 
 // ============================================================
 // Cache TX hex: NDJSON shard per hari + LRUMap in-memory bounded
+// Shard terbaru di-load dulu; shard lama lazy-load saat dibutuhkan.
 // ============================================================
 const _shardName = (d = new Date()) => {
   const p = (n) => String(n).padStart(2, "0");
@@ -96,45 +96,82 @@ const _shardName = (d = new Date()) => {
 };
 
 const TX_INDEX_CAP = (CONFIG.cache && CONFIG.cache.txIndexCap) || 50_000;
+const RECENT_SHARDS = (CONFIG.cache && CONFIG.cache.recentShards) ||
+                     Math.max(2, Math.ceil(((CONFIG.cache && CONFIG.cache.txMaxAgeHours) || 48) / 24) + 1);
+
 let _txIndex = null;
 let _txWriteStream = null;
 let _txWriteShardName = null;
+let _allShardsSorted = null;
+let _shardsLoaded = new Set();
+let _legacyMigrated = false;
+
+function _listShards() {
+  if (_allShardsSorted) return _allShardsSorted;
+  if (!existsSync(CACHE_TX_DAILY)) { _allShardsSorted = []; return _allShardsSorted; }
+  let files = [];
+  try { files = readdirSync(CACHE_TX_DAILY); } catch { return (_allShardsSorted = []); }
+  _allShardsSorted = files
+    .filter((f) => f.startsWith("tx-") && f.endsWith(".ndjson"))
+    .sort()
+    .reverse();
+  return _allShardsSorted;
+}
+
+function _loadShard(name) {
+  if (_shardsLoaded.has(name)) return;
+  _shardsLoaded.add(name);
+  const fpath = CACHE_TX_DAILY + "/" + name;
+  let raw;
+  try { raw = readFileSync(fpath, "utf8"); } catch { return; }
+  let start = 0;
+  while (start < raw.length) {
+    let nl = raw.indexOf("\n", start);
+    if (nl < 0) nl = raw.length;
+    if (nl > start) {
+      const line = raw.slice(start, nl);
+      try {
+        const o = JSON.parse(line);
+        if (o && o.t && o.h && !_txIndex.has(o.t)) _txIndex.set(o.t, o.h);
+      } catch {}
+    }
+    start = nl + 1;
+  }
+}
+
+function _migrateLegacyHex() {
+  if (_legacyMigrated) return;
+  _legacyMigrated = true;
+  if (!existsSync(CACHE_TX)) return;
+  let legacy = [];
+  try { legacy = readdirSync(CACHE_TX); } catch { return; }
+  const stream = _ensureTxStream();
+  let migrated = 0;
+  for (const f of legacy) {
+    if (!f.endsWith(".hex")) continue;
+    const txid = f.slice(0, -4);
+    const fpath = CACHE_TX + "/" + f;
+    try {
+      const hex = readFileSync(fpath, "utf8").trim();
+      if (hex && !_txIndex.has(txid)) {
+        stream.write(JSON.stringify({ t: txid, h: hex }) + "\n");
+        _txIndex.set(txid, hex);
+      }
+      rmSync(fpath, { force: true });
+      migrated++;
+    } catch {}
+  }
+  if (migrated > 0) {
+    try { rmSync(CACHE_TX, { recursive: true, force: true }); } catch {}
+  }
+}
 
 function _buildTxIndex() {
   _txIndex = new LRUMap(TX_INDEX_CAP);
-  if (!existsSync(CACHE_TX_DAILY)) return;
-  let files = [];
-  try { files = readdirSync(CACHE_TX_DAILY); } catch { return; }
-  files.sort();
-  for (const f of files) {
-    if (!f.startsWith("tx-") || !f.endsWith(".ndjson")) continue;
-    const fpath = CACHE_TX_DAILY + "/" + f;
-    let raw;
-    try { raw = readFileSync(fpath, "utf8"); } catch { continue; }
-    let start = 0;
-    while (start < raw.length) {
-      let nl = raw.indexOf("\n", start);
-      if (nl < 0) nl = raw.length;
-      if (nl > start) {
-        const line = raw.slice(start, nl);
-        try {
-          const o = JSON.parse(line);
-          if (o && o.t && o.h) _txIndex.set(o.t, o.h);
-        } catch {}
-      }
-      start = nl + 1;
-    }
-  }
-  if (existsSync(CACHE_TX)) {
-    let legacy = [];
-    try { legacy = readdirSync(CACHE_TX); } catch {}
-    for (const f of legacy) {
-      if (!f.endsWith(".hex")) continue;
-      const txid = f.slice(0, -4);
-      if (_txIndex.has(txid)) continue;
-      try { _txIndex.set(txid, readFileSync(CACHE_TX + "/" + f, "utf8").trim()); } catch {}
-    }
-  }
+  const shards = _listShards();
+  const recent = shards.slice(0, RECENT_SHARDS);
+  for (const f of recent) _loadShard(f);
+  _migrateLegacyHex();
 }
 
 function _ensureTxStream() {
@@ -148,18 +185,19 @@ function _ensureTxStream() {
 }
 
 export function pruneOldCache(maxAgeHours) {
-  if (!existsSync(CACHE_TX_DAILY)) return 0;
   const cutoff = Date.now() - maxAgeHours * 3600 * 1000;
   let removed = 0;
-  let files = [];
-  try { files = readdirSync(CACHE_TX_DAILY); } catch { return 0; }
-  for (const f of files) {
-    if (!f.startsWith("tx-") || !f.endsWith(".ndjson")) continue;
-    const fpath = CACHE_TX_DAILY + "/" + f;
-    try {
-      const st = statSync(fpath);
-      if (st.mtimeMs < cutoff) { rmSync(fpath, { force: true }); removed++; }
-    } catch {}
+  if (existsSync(CACHE_TX_DAILY)) {
+    let files = [];
+    try { files = readdirSync(CACHE_TX_DAILY); } catch {}
+    for (const f of files) {
+      if (!f.startsWith("tx-") || !f.endsWith(".ndjson")) continue;
+      const fpath = CACHE_TX_DAILY + "/" + f;
+      try {
+        const st = statSync(fpath);
+        if (st.mtimeMs < cutoff) { rmSync(fpath, { force: true }); removed++; }
+      } catch {}
+    }
   }
   if (existsSync(CACHE_TX)) {
     let legacy = [];
@@ -172,14 +210,23 @@ export function pruneOldCache(maxAgeHours) {
       } catch {}
     }
   }
+  _allShardsSorted = null;
   return removed;
 }
 
 export async function fetchTxHexCached(base, txid) {
   if (CACHE_ENABLED) {
     if (_txIndex === null) _buildTxIndex();
-    const cached = _txIndex.get(txid);
+    let cached = _txIndex.get(txid);
     if (cached) { CACHE_STATS.hexHits++; return cached; }
+    // lazy-load shard lain bila belum dimuat
+    const shards = _listShards();
+    for (const f of shards) {
+      if (_shardsLoaded.has(f)) continue;
+      _loadShard(f);
+      cached = _txIndex.get(txid);
+      if (cached) { CACHE_STATS.hexHits++; return cached; }
+    }
   }
   CACHE_STATS.hexMisses++;
   const hex = await esploraFetch(base, "/tx/" + txid + "/hex");
@@ -269,7 +316,7 @@ export function loadSeenSnapshot(maxAgeHours = 48) {
 export function saveSeenSnapshot(lruSet) {
   try {
     ensureCacheDir();
-    const ids = Array.from(lruSet.m.keys());
+    const ids = lruSet.toArray();
     const tmp = SEEN_FILE + ".tmp";
     writeFileSync(tmp, JSON.stringify({ ts: Date.now(), ids }));
     renameSync(tmp, SEEN_FILE);
