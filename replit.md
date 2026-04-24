@@ -6,11 +6,35 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - Node.js >= 18 (ESM, `"type": "module"`)
 - `@noble/curves` (secp256k1), `@noble/hashes` (sha256, ripemd160)
 - `undici` (HTTP/1.1 keep-alive Agent untuk fetch), `ws` (WebSocket realtime)
-- Tanpa framework web, tanpa server. Single-file CLI (~3000 baris).
+- Tanpa framework web, tanpa server. CLI modular (~3000 baris terbagi ke modul-modul kecil).
 
 ## Struktur
-- `index.js` — seluruh CLI (single file, semua logic + UI)
-- `package.json` — `@noble/curves ^1.6.0`, `@noble/hashes ^1.5.0`, ESM type module
+- `index.js` — entry tipis (~150 baris): parsing argv, dispatch ke command handlers
+- `src/` — modul library inti
+  - `config.js` — load `config.json`, `CACHE_ENABLED` live binding + `setCacheEnabled()`
+  - `log.js` — `logScan(level, msg)` ke `scan.log`
+  - `bytes.js` — `hexToBytes`, `bytesToHex`, `padHex`, `concat`, `reverseBytes`, `u32le`, `u64le`, dll
+  - `hash.js` — re-export `secp256k1`, `sha256d`, `hash160`
+  - `ui.js` — palette `C`, `ICON`, `banner`, `header`, `kv`, `sep`, `box`, `drawProgress`, `visLen`, `W`
+  - `profile.js` — `PROFILE.enabled`, `profStart/End/Report`
+  - `tx.js` — `parseDER`, `parseScriptPushes`, `readVarInt/writeVarInt`, `parseTx`
+  - `sighash.js` — `legacySighash`, `bip143Context`, `bip143Sighash`
+  - `address.js` — `base58Encode`, `bech32Encode`, `p2pkhAddress`, `p2wpkhAddress`, `p2shP2wpkhAddress`, `toWIF`
+  - `ecdsa.js` — `recoverPrivateKey(r,s1,z1,s2,z2)`
+  - `net.js` — undici Agent global, `esploraFetch`, `fetchWithTimeout`, `rateLimitWait`, `REQ_STATS`, `reqRatePerSec`, `RETRY`, `sleep`
+  - `telegram.js` — `notifyTelegram(text)`
+  - `price.js` — `fetchBtcUsdPrice`, `formatBTC`, `formatUSD`, `fetchAddressBalance`
+  - `cache.js` — `LRUSet`, `LRUMap`, `CACHE_DIR`, `SEEN_FILE`, daily NDJSON cache (`fetchTxHexCached`, `pruneOldCache`, `_buildTxIndex`), address-list cache, resume state, watchlist, `appendHit` stream, `CACHE_STATS`, `_hitsStreams`
+  - `analysis.js` — `detectReuse`, `processTxForAddress`, `processTxAllInputs`, `runWithConcurrency`, `fetchAllTxsForAddress`
+- `src/commands/` — handler per sub-command
+  - `analyze.js` — `analyzeTx`, `analyzeManual`, `analyzeByTxid`
+  - `address.js` — `analyzeAddress`, `batchAddresses`
+  - `explore.js` — `scanExplore` (single-pipeline)
+  - `daemon.js` — `runDaemon` (loop + WS)
+  - `stats.js` — `showStats` (parse `scan.log`)
+  - `help.js` — `help()` banner
+  - `menu.js` — `interactiveMenu()`
+- `package.json` — `@noble/curves ^1.6.0`, `@noble/hashes ^1.5.0`, `undici`, `ws`, ESM type module
 - `.btc-cache/` — runtime cache (di-gitignore)
 - `hits.txt` / `hits_LIVE.txt` / `hits_CROSS.txt` — output runtime (di-gitignore)
 - `config.json` — konfigurasi opsional (di-gitignore)
