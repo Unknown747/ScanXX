@@ -310,6 +310,25 @@ export async function runDaemon(opts = {}) {
       "  mem=" + memMB + "MB  req/s=" + rps
     ));
 
+    // --- Top-3 R yang paling sering muncul (trending nonce) ---
+    {
+      let topR = null;
+      for (const [rh, lst] of rIndex) {
+        if (lst.length < 2) continue;
+        if (!topR) topR = [];
+        topR.push([rh, lst.length]);
+      }
+      if (topR && topR.length) {
+        topR.sort((a, b) => b[1] - a[1]);
+        const top3 = topR.slice(0, 3).map(([rh, n]) => {
+          const txt = n + "× " + rh.slice(0, 16) + "…";
+          return n >= 3 ? c(C.yellow + C.bold, txt) : c(C.yellow, txt);
+        }).join(c(C.dim, "  ·  "));
+        const more = topR.length > 3 ? c(C.dim, "  (+" + (topR.length - 3) + " R lain)") : "";
+        console.log(c(C.dim, "    Top R (≥2): ") + top3 + more);
+      }
+    }
+
     if (cycle % SAVE_SEEN_EVERY === 0) saveSeenSnapshot(seenTxids);
 
     if (running) {

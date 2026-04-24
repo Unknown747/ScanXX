@@ -93,6 +93,7 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - **Telegram fire-and-forget**: notify pakai `.catch(() => {})` tanpa await — daemon loop tidak ke-block kalau Telegram lambat/timeout.
 - Append hits via `WriteStream` (tidak block event loop seperti `appendFileSync`)
 - Status bar tiap siklus: `siklus / tx / sig / hit / pool / seen / mem MB / req/s`
+- **Trending nonce (Top R ≥2)**: baris bonus muncul kalau ada R muncul ≥2× di pool — top-3 ditampilkan dengan format `N× <r-prefix>…`. Diam saat tidak ada (hindari noise). Bermanfaat memantau R yang "hot" sebelum menjadi hit.
 - Countdown timer antar siklus, Ctrl+C untuk berhenti gracefully (cleanup WS + stream + save snapshot)
 - Ringkasan akhir: total siklus/tx/sig/hit/req + lokasi snapshot
 
