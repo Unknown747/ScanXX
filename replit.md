@@ -30,7 +30,7 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - Hits file: `hits.txt`
 
 ## Perintah utama
-- `node index.js` — menu interaktif (pilihan 0-9, D)
+- `node index.js` — menu interaktif (pilihan 0-9, C)
 - `node index.js txid <txid>`
 - `node index.js address <addr> [--concurrency N]`
 - `node index.js tx <hex>` / `tx-file <path>` (`--amount i=sats` untuk SegWit)
@@ -45,14 +45,14 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 ## Menu Interaktif (pilihan)
 - 1: Scan Address
 - 2: Analisis TXID
-- 3: Raw TX Hex
-- 4: Signature Manual (R/S/Z)
-- 5: R-Reuse dari JSON
-- 6: Bantuan Lengkap
-- 7: Hapus Cache
-- 8: Batch Scan File
-- 9: Scan Explorer (mempool/blocks)
-- D: Daemon Auto-Scan (loop berkelanjutan)
+- 3: Batch Scan File
+- 4: Scan Explorer (mempool/blocks)
+- 5: Daemon Auto-Scan (loop berkelanjutan)
+- 6: Raw TX Hex
+- 7: Signature Manual (R/S/Z)
+- 8: R-Reuse dari JSON
+- 9: Bantuan Lengkap
+- C: Hapus Cache
 - 0: Keluar
 
 ## Daemon (runDaemon)

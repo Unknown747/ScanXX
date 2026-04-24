@@ -2014,28 +2014,28 @@ async function interactiveMenu() {
     menuTop("SCAN ONLINE");
     menuItem("1", ICON.scan,   "Scan Address",    "Semua tx dari 1 wallet, cari R-reuse");
     menuItem("2", ICON.search, "Analisis TXID",   "1 transaksi via TXID");
-    menuItem("8", ICON.file,   "Batch Scan File", "Daftar address, 1 per baris");
-    menuItem("9", ICON.btc,    "Scan Explorer",   "Langsung dari mempool / blok terbaru");
-    menuItem("D", "⚡",        "Daemon Auto-Scan","Loop terus, alert real-time jika hit");
+    menuItem("3", ICON.file,   "Batch Scan File", "Daftar address, 1 per baris");
+    menuItem("4", ICON.btc,    "Scan Explorer",   "Langsung dari mempool / blok terbaru");
+    menuItem("5", "⚡",        "Daemon Auto-Scan","Loop terus, alert real-time jika hit");
     menuBot();
 
     console.log();
     menuTop("ANALISIS MANUAL");
-    menuItem("3", ICON.tool,   "Raw TX Hex",         "Tempel hex raw transaksi");
-    menuItem("4", ICON.tool,   "Signature Manual",   "Masukkan R, S, Z secara manual");
-    menuItem("5", ICON.file,   "R-Reuse dari JSON",  "File daftar signature [{r,s,z}]");
+    menuItem("6", ICON.tool,   "Raw TX Hex",         "Tempel hex raw transaksi");
+    menuItem("7", ICON.tool,   "Signature Manual",   "Masukkan R, S, Z secara manual");
+    menuItem("8", ICON.file,   "R-Reuse dari JSON",  "File daftar signature [{r,s,z}]");
     menuBot();
 
     console.log();
     menuTop("LAINNYA");
-    menuItem("6", ICON.info,  "Bantuan Lengkap", "Tampilkan semua perintah & opsi");
-    menuItem("7", ICON.tool,  "Hapus Cache",     "Bersihkan folder .btc-cache/");
+    menuItem("9", ICON.info,  "Bantuan Lengkap", "Tampilkan semua perintah & opsi");
+    menuItem("C", ICON.tool,  "Hapus Cache",     "Bersihkan folder .btc-cache/");
     menuItem("0", ICON.err,   "Keluar",          "");
     menuBot();
 
     console.log();
     const choice = (await ask(
-      "  " + c(C.yellow + C.bold, ICON.arrow + " Pilihan [0-9 / D]: ")
+      "  " + c(C.yellow + C.bold, ICON.arrow + " Pilihan [0-9 / C]: ")
     )).trim();
 
     if (choice === "0" || choice === "") { rl.close(); return; }
@@ -2059,36 +2059,6 @@ async function interactiveMenu() {
       rl.close();
       await analyzeByTxid(txid, { api: CONFIG.api || DEFAULT_API });
     } else if (choice === "3") {
-      const hex = (await inp("Raw TX hex       ")).trim();
-      if (!hex) throw new Error("Hex kosong");
-      rl.close();
-      await analyzeTx(hex, { amounts: {} });
-    } else if (choice === "4") {
-      const r   = (await inp("R (hex)          ")).trim();
-      const s   = (await inp("S (hex)          ")).trim();
-      const z   = (await inp("Z / sighash (hex)")).trim();
-      const pub = (await inp("Public key (opt) ")).trim();
-      rl.close();
-      if (!r || !s || !z) throw new Error("R, S, dan Z wajib diisi");
-      await analyzeManual([{ r, s, z, pubkey: pub || undefined }]);
-    } else if (choice === "5") {
-      const path = (await inp("Path file JSON   ")).trim();
-      rl.close();
-      const data = JSON.parse(readFileSync(path, "utf8"));
-      if (!Array.isArray(data)) throw new Error("File harus berupa array JSON");
-      await analyzeManual(data);
-    } else if (choice === "6") {
-      rl.close();
-      help();
-    } else if (choice === "7") {
-      rl.close();
-      if (existsSync(CACHE_DIR)) {
-        rmSync(CACHE_DIR, { recursive: true, force: true });
-        console.log("  " + ICON.ok + " " + c(C.green, "Cache .btc-cache/ berhasil dihapus."));
-      } else {
-        console.log("  " + ICON.info + " " + c(C.dim, "Tidak ada cache untuk dihapus."));
-      }
-    } else if (choice === "8") {
       const fpath = (await inp("Path file address")).trim();
       rl.close();
       if (!fpath) throw new Error("Path file kosong");
@@ -2097,7 +2067,37 @@ async function interactiveMenu() {
         concurrency: CONFIG.concurrency,
         hitsFile: CONFIG.hitsFile,
       });
+    } else if (choice === "6") {
+      const hex = (await inp("Raw TX hex       ")).trim();
+      if (!hex) throw new Error("Hex kosong");
+      rl.close();
+      await analyzeTx(hex, { amounts: {} });
+    } else if (choice === "7") {
+      const r   = (await inp("R (hex)          ")).trim();
+      const s   = (await inp("S (hex)          ")).trim();
+      const z   = (await inp("Z / sighash (hex)")).trim();
+      const pub = (await inp("Public key (opt) ")).trim();
+      rl.close();
+      if (!r || !s || !z) throw new Error("R, S, dan Z wajib diisi");
+      await analyzeManual([{ r, s, z, pubkey: pub || undefined }]);
+    } else if (choice === "8") {
+      const path = (await inp("Path file JSON   ")).trim();
+      rl.close();
+      const data = JSON.parse(readFileSync(path, "utf8"));
+      if (!Array.isArray(data)) throw new Error("File harus berupa array JSON");
+      await analyzeManual(data);
     } else if (choice === "9") {
+      rl.close();
+      help();
+    } else if (choice === "C" || choice === "c") {
+      rl.close();
+      if (existsSync(CACHE_DIR)) {
+        rmSync(CACHE_DIR, { recursive: true, force: true });
+        console.log("  " + ICON.ok + " " + c(C.green, "Cache .btc-cache/ berhasil dihapus."));
+      } else {
+        console.log("  " + ICON.info + " " + c(C.dim, "Tidak ada cache untuk dihapus."));
+      }
+    } else if (choice === "4") {
       console.log();
       console.log(c(C.gray, "  ┌─ ") + c(C.bold + C.yellow, "SUMBER DATA") + c(C.gray, " ─────────────────────────────────────────────────┐"));
       console.log(c(C.gray, "  │") + " " + c(C.yellow + C.bold, "1") + "  " + ICON.scan + "  " + c(C.bold + C.white, "Mempool") +
@@ -2118,7 +2118,7 @@ async function interactiveMenu() {
         mode,
         limit,
       });
-    } else if (choice === "D" || choice === "d") {
+    } else if (choice === "5") {
       console.log();
       console.log(c(C.gray, "  ┌─ ") + c(C.bold + C.yellow, "⚡ DAEMON AUTO-SCAN") + c(C.gray, " ────────────────────────────────────────────┐"));
       console.log(c(C.gray, "  │") + " " + c(C.yellow + C.bold, "1") + "  " + ICON.scan + "  " + c(C.bold + C.white, "Mempool") +
