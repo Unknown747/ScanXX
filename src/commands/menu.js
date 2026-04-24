@@ -3,11 +3,33 @@ import { createInterface } from "node:readline/promises";
 import { CONFIG, DEFAULT_API, CACHE_ENABLED } from "../config.js";
 import { c, C, ICON, W, banner, visLen } from "../ui.js";
 import { CACHE_DIR } from "../cache.js";
+import { getPool } from "../endpoints.js";
 import { analyzeTx, analyzeManual, analyzeByTxid } from "./analyze.js";
 import { analyzeAddress, batchAddresses } from "./address.js";
 import { scanExplore } from "./explore.js";
 import { runDaemon } from "./daemon.js";
 import { help } from "./help.js";
+
+function endpointBadge() {
+  const pool = getPool(CONFIG.api || DEFAULT_API);
+  const sum = pool.summary();
+  const color = sum.active === sum.total ? C.green : (sum.active > 0 ? C.yellow : C.red);
+  return c(C.dim, "endpoint ") + c(color, sum.active + "/" + sum.total);
+}
+
+function printPoolMini() {
+  const pool = getPool(CONFIG.api || DEFAULT_API);
+  const eps = pool.list();
+  console.log(c(C.dim, "  Pool endpoint aktif (rotasi otomatis):"));
+  for (const ep of eps) {
+    const now = Date.now();
+    const ready = ep.cooldownUntil <= now;
+    const badge = ready ? c(C.green, "●") : c(C.red, "●");
+    const cd = ready ? "" : c(C.dim, " (cooldown " + Math.ceil((ep.cooldownUntil - now) / 1000) + "s)");
+    console.log("    " + badge + " " + c(C.cyan, ep.url) + cd);
+  }
+  console.log();
+}
 
 export async function interactiveMenu() {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -21,6 +43,8 @@ export async function interactiveMenu() {
     const api = (CONFIG.api || DEFAULT_API).replace("https://", "");
     console.log(c(C.gray, "  ") +
       c(C.dim, "API ") + c(C.cyan, api) +
+      c(C.gray, "  ·  ") +
+      endpointBadge() +
       c(C.gray, "  ·  ") +
       c(C.dim, "paralel ") + c(C.white, String(CONFIG.concurrency)) +
       c(C.gray, "  ·  ") +
@@ -140,6 +164,7 @@ export async function interactiveMenu() {
         c(C.dim, "  Transaksi sudah dikonfirmasi") + c(C.gray, "           │"));
       console.log(c(C.gray, "  └" + "─".repeat(W - 4) + "┘"));
       console.log();
+      printPoolMini();
       const cfgMode = (CONFIG.explore && CONFIG.explore.mode) || "mempool";
       const defSrc = cfgMode === "blocks" ? "2" : "1";
       const src = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Sumber [1/2, default " + defSrc + "]: "))).trim() || defSrc;
@@ -160,6 +185,7 @@ export async function interactiveMenu() {
         c(C.dim, "  Confirmed txs") + c(C.gray, "                              │"));
       console.log(c(C.gray, "  └" + "─".repeat(W - 4) + "┘"));
       console.log();
+      printPoolMini();
       const cfgDmode = (CONFIG.daemon && CONFIG.daemon.mode) || "mempool";
       const defDsrc  = cfgDmode === "blocks" ? "2" : "1";
       const dsrc = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Sumber [1/2, default " + defDsrc + "]: "))).trim() || defDsrc;

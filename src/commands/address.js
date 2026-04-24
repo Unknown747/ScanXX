@@ -12,6 +12,7 @@ import {
   fetchAllTxsForAddress, processTxForAddress,
   runWithConcurrency, detectReuse,
 } from "../analysis.js";
+import { getPool } from "../endpoints.js";
 
 export async function analyzeAddress(address, opts) {
   if (!opts) opts = {};
@@ -20,7 +21,13 @@ export async function analyzeAddress(address, opts) {
   console.log();
   header("Scan Address Wallet", address);
   logScan("SCAN", "mulai scan address=" + address + " concurrency=" + concurrency);
-  kv("API", base, C.cyan);
+  {
+    const pool = getPool(base);
+    const sum = pool.summary();
+    const epColor = sum.active === sum.total ? C.green : (sum.active > 0 ? C.yellow : C.red);
+    kv("Endpoint", sum.active + "/" + sum.total + " aktif (rotasi otomatis)", epColor);
+    kv("Primary", base, C.dim);
+  }
   kv("Paralel", concurrency + " request", C.bold);
   kv("Cache", CACHE_ENABLED ? "AKTIF (.btc-cache/)" : "NONAKTIF",
      CACHE_ENABLED ? C.green : C.yellow);
@@ -156,7 +163,14 @@ export async function batchAddresses(filePath, opts = {}) {
   console.log();
   header("Batch Scan", addresses.length + " address dari " + filePath);
   kv("Hits file", opts.hitsFile || CONFIG.hitsFile, C.cyan);
-  kv("API", opts.api || DEFAULT_API);
+  {
+    const baseB = opts.api || DEFAULT_API;
+    const pool = getPool(baseB);
+    const sum = pool.summary();
+    const epColor = sum.active === sum.total ? C.green : (sum.active > 0 ? C.yellow : C.red);
+    kv("Endpoint", sum.active + "/" + sum.total + " aktif (rotasi otomatis)", epColor);
+    kv("Primary", baseB, C.dim);
+  }
   kv("Paralel", (opts.concurrency || CONFIG.concurrency) + " request");
 
   const summary = [];

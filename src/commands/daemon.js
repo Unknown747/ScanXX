@@ -100,7 +100,15 @@ export async function runDaemon(opts = {}) {
   kv("Realtime",  realtime ? "WebSocket aktif (mempool.space)" : "Polling biasa", realtime ? C.green : C.dim);
   if (watchlist) kv("Watchlist", opts.watchFile + " (" + watchlist.size + " address)", C.bold + C.yellow);
   if (PROFILE.enabled) kv("Profile",  "AKTIF (timing per fase)", C.cyan);
-  kv("API",       base, C.dim);
+  {
+    const epPool0 = getPool(base);
+    const epSum0 = epPool0.summary();
+    const epColor = epSum0.active === epSum0.total ? C.green : (epSum0.active > 0 ? C.yellow : C.red);
+    kv("Endpoint",  epSum0.active + "/" + epSum0.total + " aktif (rotasi otomatis)", epColor);
+    for (const ep of epPool0.list()) {
+      kv("  •", ep.url + (ep.url === epPool0.primary ? c(C.dim, "  (primary)") : ""), C.dim);
+    }
+  }
   kv("Hits file", hitsFile, C.dim);
   console.log();
   sep("Daemon dimulai · " + new Date().toLocaleString("id-ID"));

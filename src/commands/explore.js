@@ -1,6 +1,7 @@
 import { CONFIG, DEFAULT_API } from "../config.js";
 import { c, C, header, kv, sep, drawProgress } from "../ui.js";
 import { esploraFetch } from "../net.js";
+import { getPool } from "../endpoints.js";
 import {
   processTxAllInputs, runWithConcurrency, detectReuse,
 } from "../analysis.js";
@@ -23,7 +24,13 @@ export async function scanExplore(opts = {}) {
   kv("Mode", mode === "mempool" ? "Mempool (unconfirmed)" : "Blok terbaru", C.cyan);
   kv("Maks TX", limitLabel, C.bold);
   kv("Paralel", concurrency + " request", C.bold);
-  kv("API", base, C.dim);
+  {
+    const pool = getPool(base);
+    const sum = pool.summary();
+    const epColor = sum.active === sum.total ? C.green : (sum.active > 0 ? C.yellow : C.red);
+    kv("Endpoint", sum.active + "/" + sum.total + " aktif (rotasi otomatis)", epColor);
+    kv("Primary", base, C.dim);
+  }
 
   let txids = [];
 
