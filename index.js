@@ -91,8 +91,21 @@ const hexToBytes = (h) => {
   for (let i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
   return out;
 };
-const bytesToHex = (b) =>
-  Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+// Tabel hex byte → string ("00".."ff") untuk bytesToHex cepat (hindari padStart per byte).
+const _HEX = new Array(256);
+for (let i = 0; i < 256; i++) _HEX[i] = i.toString(16).padStart(2, "0");
+const bytesToHex = (b) => {
+  let s = "";
+  for (let i = 0; i < b.length; i++) s += _HEX[b[i]];
+  return s;
+};
+// Konversi bytes (big-endian) langsung ke BigInt — hemat alokasi string hex sementara
+// untuk hot path parseDER & sighash (dipanggil per-signature).
+const bytesToBigInt = (b) => {
+  let v = 0n;
+  for (let i = 0; i < b.length; i++) v = (v << 8n) | BigInt(b[i]);
+  return v;
+};
 const concat = (...arr) => {
   const total = arr.reduce((s, a) => s + a.length, 0);
   const out = new Uint8Array(total);
@@ -132,7 +145,6 @@ const invMod = (a, m = N) => {
 // ============================================================
 function parseDER(sig) {
   if (sig[0] !== 0x30) throw new Error("DER tidak valid: byte awal bukan 0x30");
-  const totalLen = sig[1];
   if (sig[2] !== 0x02) throw new Error("DER tidak valid: marker R");
   const rLen = sig[3];
   const r = sig.slice(4, 4 + rLen);
@@ -142,12 +154,9 @@ function parseDER(sig) {
   const s = sig.slice(sMarker + 2, sMarker + 2 + sLen);
   const sighashType = sig[sMarker + 2 + sLen]; // boleh undefined
   return {
-    r: BigInt("0x" + bytesToHex(r)),
-    s: BigInt("0x" + bytesToHex(s)),
-    rHex: bytesToHex(r).replace(/^00/, ""),
-    sHex: bytesToHex(s).replace(/^00/, ""),
+    r: bytesToBigInt(r),
+    s: bytesToBigInt(s),
     sighashType,
-    derLen: 2 + totalLen,
   };
 }
 
@@ -229,15 +238,29 @@ function writeVarInt(n) {
   return out;
 }
 function u32le(n) {
-  return new Uint8Array([
-    n & 0xff,
-    (n >> 8) & 0xff,
-    (n >> 16) & 0xff,
-    (n >> 24) & 0xff,
-  ]);
+  const out = new Uint8Array(4);
+  out[0] = n & 0xff;
+  out[1] = (n >>> 8) & 0xff;
+  out[2] = (n >>> 16) & 0xff;
+  out[3] = (n >>> 24) & 0xff;
+  return out;
 }
 function u64le(n) {
   const out = new Uint8Array(8);
+  // Hindari BigInt untuk nilai aman (<= 2^53). Fallback ke BigInt jika besar.
+  if (typeof n === "number" && Number.isSafeInteger(n) && n >= 0) {
+    let lo = n >>> 0;
+    let hi = Math.floor(n / 0x100000000) >>> 0;
+    out[0] = lo & 0xff;
+    out[1] = (lo >>> 8) & 0xff;
+    out[2] = (lo >>> 16) & 0xff;
+    out[3] = (lo >>> 24) & 0xff;
+    out[4] = hi & 0xff;
+    out[5] = (hi >>> 8) & 0xff;
+    out[6] = (hi >>> 16) & 0xff;
+    out[7] = (hi >>> 24) & 0xff;
+    return out;
+  }
   let v = BigInt(n);
   for (let i = 0; i < 8; i++) {
     out[i] = Number(v & 0xffn);
@@ -359,8 +382,13 @@ function legacySighash(tx, inputIndex, scriptCode, sighashType = 0x01) {
 
 // ============================================================
 // Sighash BIP143 (segwit v0, P2WPKH/P2SH-P2WPKH)
+// ----
+// Optimasi: hashPrevouts/hashSequence/hashOutputs identik untuk semua input
+// di tx yang sama. Hitung sekali via bip143Context(tx), lalu pakai ulang
+// untuk tiap input. Ini menghemat puluhan ms per tx besar.
 // ============================================================
-function bip143Sighash(tx, inputIndex, scriptCode, amount, sighashType = 0x01) {
+function bip143Context(tx) {
+  if (tx._bip143Ctx) return tx._bip143Ctx;
   const hashPrevouts = dsha256(
     concat(...tx.vin.map((v) => concat(v.prevTxid, u32le(v.prevVout))))
   );
@@ -374,6 +402,12 @@ function bip143Sighash(tx, inputIndex, scriptCode, amount, sighashType = 0x01) {
       )
     )
   );
+  const ctx = { hashPrevouts, hashSequence, hashOutputs };
+  Object.defineProperty(tx, "_bip143Ctx", { value: ctx, enumerable: false });
+  return ctx;
+}
+function bip143Sighash(tx, inputIndex, scriptCode, amount, sighashType = 0x01) {
+  const { hashPrevouts, hashSequence, hashOutputs } = bip143Context(tx);
   const vi = tx.vin[inputIndex];
   const pre = concat(
     u32le(tx.version),
@@ -509,25 +543,17 @@ const padHex = (n, len = 64) =>
   n.toString(16).padStart(len, "0");
 
 const C = {
-  reset:     "\x1b[0m",
-  bold:      "\x1b[1m",
-  dim:       "\x1b[2m",
-  italic:    "\x1b[3m",
-  underline: "\x1b[4m",
-  red:       "\x1b[31m",
-  green:     "\x1b[32m",
-  yellow:    "\x1b[33m",
-  gold:      "\x1b[33m",
-  blue:      "\x1b[34m",
-  magenta:   "\x1b[35m",
-  cyan:      "\x1b[36m",
-  white:     "\x1b[97m",
-  gray:      "\x1b[90m",
-  orange:    "\x1b[38;5;208m",
-  bgRed:     "\x1b[41m",
-  bgGreen:   "\x1b[42m",
-  bgBlue:    "\x1b[44m",
-  bgOrange:  "\x1b[48;5;208m",
+  reset:   "\x1b[0m",
+  bold:    "\x1b[1m",
+  dim:     "\x1b[2m",
+  red:     "\x1b[31m",
+  green:   "\x1b[32m",
+  yellow:  "\x1b[33m",
+  magenta: "\x1b[35m",
+  cyan:    "\x1b[36m",
+  white:   "\x1b[97m",
+  gray:    "\x1b[90m",
+  bgRed:   "\x1b[41m",
 };
 
 const useColor = !process.env.NO_COLOR && (process.stdout.isTTY || !!process.env.FORCE_COLOR);
@@ -656,7 +682,6 @@ function box(title, lines, accent) {
 const ICON = {
   ok:     useColor ? "\x1b[32m✔\x1b[0m"  : "[OK]",
   err:    useColor ? "\x1b[31m✘\x1b[0m"  : "[ERR]",
-  warn:   useColor ? "\x1b[33m⚠\x1b[0m"  : "[!]",
   info:   useColor ? "\x1b[36mℹ\x1b[0m"  : "[i]",
   key:    useColor ? "\x1b[33m🔑\x1b[0m" : "[KEY]",
   money:  useColor ? "\x1b[32m💰\x1b[0m" : "[$]",
@@ -667,8 +692,6 @@ const ICON = {
   search: useColor ? "\x1b[36m⌕\x1b[0m"  : "[?]",
   file:   useColor ? "\x1b[35m◈\x1b[0m"  : "[F]",
   tool:   useColor ? "\x1b[90m◆\x1b[0m"  : "[T]",
-  live:   useColor ? "\x1b[32m●\x1b[0m"  : "[LIVE]",
-  dead:   useColor ? "\x1b[90m○\x1b[0m"  : "[DEAD]",
 };
 
 // ---- Banner utama ----
@@ -785,12 +808,12 @@ async function analyzeTx(rawHex, opts = {}) {
           );
         } else {
           const h = bip143Sighash(tx, i, scriptCode, amount, sht);
-          z = BigInt("0x" + bytesToHex(h));
+          z = bytesToBigInt(h);
           console.log("  Z (msg)  :", c(C.yellow, bytesToHex(h)));
         }
       } else {
         const h = legacySighash(tx, i, scriptCode, sht);
-        z = BigInt("0x" + bytesToHex(h));
+        z = bytesToBigInt(h);
         console.log("  Z (msg)  :", c(C.yellow, bytesToHex(h)));
       }
     } catch (e) {
@@ -1212,6 +1235,31 @@ class LRUSet {
   get size() { return this.m.size; }
 }
 
+// ---- LRU Map (untuk _txIndex hex tx, batasi memori) ----
+// Menjaga insertion order Map JS: akses ulang via get() memindah key ke akhir
+// supaya entri "panas" tidak ter-evict dulu.
+class LRUMap {
+  constructor(max) { this.max = max; this.m = new Map(); }
+  has(k) { return this.m.has(k); }
+  get(k) {
+    const v = this.m.get(k);
+    if (v !== undefined) {
+      this.m.delete(k);
+      this.m.set(k, v);
+    }
+    return v;
+  }
+  set(k, v) {
+    if (this.m.has(k)) this.m.delete(k);
+    this.m.set(k, v);
+    if (this.m.size > this.max) {
+      const it = this.m.keys().next();
+      if (!it.done) this.m.delete(it.value);
+    }
+  }
+  get size() { return this.m.size; }
+}
+
 // ---- Append stream ke hits file (hindari appendFileSync di hot path daemon) ----
 const _hitsStreams = new Map(); // path -> WriteStream
 function appendHit(path, text) {
@@ -1406,26 +1454,40 @@ const _shardName = (d = new Date()) => {
   const p = (n) => String(n).padStart(2, "0");
   return "tx-" + d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + ".ndjson";
 };
-let _txIndex = null;          // Map<txid, hex> in-memory (lazy build)
+// Cap maks entri _txIndex in-memory. 50k tx ≈ ~30MB hex, aman untuk daemon long-run.
+const TX_INDEX_CAP = (CONFIG.cache && CONFIG.cache.txIndexCap) || 50_000;
+let _txIndex = null;          // LRUMap<txid, hex> in-memory (lazy build, bounded)
 let _txWriteStream = null;    // append stream untuk shard hari ini
 let _txWriteShardName = null; // nama shard yang lagi dipakai stream
 
+// Build _txIndex secara streaming (line-by-line) supaya tidak load full file ke
+// memori — penting kalau shard NDJSON sudah besar (puluhan ribu tx/hari).
 function _buildTxIndex() {
-  _txIndex = new Map();
+  _txIndex = new LRUMap(TX_INDEX_CAP);
   if (!existsSync(CACHE_TX_DAILY)) return;
   let files = [];
   try { files = readdirSync(CACHE_TX_DAILY); } catch { return; }
+  // Urutkan: shard terbaru dimuat terakhir supaya tetap "panas" di LRU.
+  files.sort();
   for (const f of files) {
     if (!f.startsWith("tx-") || !f.endsWith(".ndjson")) continue;
     const fpath = CACHE_TX_DAILY + "/" + f;
     let raw;
     try { raw = readFileSync(fpath, "utf8"); } catch { continue; }
-    for (const line of raw.split("\n")) {
-      if (!line) continue;
-      try {
-        const o = JSON.parse(line);
-        if (o && o.t && o.h) _txIndex.set(o.t, o.h);
-      } catch {}
+    // Parsing manual per-baris (lebih cepat dari split + JSON.parse pada NDJSON ringan
+    // berisi {"t":"<txid>","h":"<hex>"}).
+    let start = 0;
+    while (start < raw.length) {
+      let nl = raw.indexOf("\n", start);
+      if (nl < 0) nl = raw.length;
+      if (nl > start) {
+        const line = raw.slice(start, nl);
+        try {
+          const o = JSON.parse(line);
+          if (o && o.t && o.h) _txIndex.set(o.t, o.h);
+        } catch {}
+      }
+      start = nl + 1;
     }
   }
   // Migrasi opsional: baca cache lama file-per-tx (dipakai sekali, lalu cukup biarkan)
@@ -1701,9 +1763,9 @@ async function processTxForAddress(tx, address, base) {
       if (isWitness) {
         const amt = tx.vin[i].prevout && tx.vin[i].prevout.value;
         if (amt === undefined) continue;
-        z = BigInt("0x" + bytesToHex(bip143Sighash(parsed, i, scriptCode, amt, sht)));
+        z = bytesToBigInt(bip143Sighash(parsed, i, scriptCode, amt, sht));
       } else {
-        z = BigInt("0x" + bytesToHex(legacySighash(parsed, i, scriptCode, sht)));
+        z = bytesToBigInt(legacySighash(parsed, i, scriptCode, sht));
       }
     } catch { continue; }
     out.push({
@@ -1968,9 +2030,9 @@ async function processTxAllInputs(tx, base) {
       if (isWitness) {
         const amt = tx.vin && tx.vin[i] && tx.vin[i].prevout && tx.vin[i].prevout.value;
         if (amt == null) continue;
-        z = BigInt("0x" + bytesToHex(bip143Sighash(parsed, i, scriptCode, amt, sht)));
+        z = bytesToBigInt(bip143Sighash(parsed, i, scriptCode, amt, sht));
       } else {
-        z = BigInt("0x" + bytesToHex(legacySighash(parsed, i, scriptCode, sht)));
+        z = bytesToBigInt(legacySighash(parsed, i, scriptCode, sht));
       }
     } catch { continue; }
     out.push({
@@ -2042,55 +2104,43 @@ async function scanExplore(opts = {}) {
   }
   console.log(c(C.bold, "Total " + txids.length + " TXID akan dianalisis."));
 
-  // Ambil metadata (butuh prevout.value untuk sighash SegWit)
+  // Pipeline 1-pass: fetch metadata + ekstrak R/S/Z dari semua input dalam satu
+  // jalur konkuren. Sebelumnya 2 fase terpisah memaksa "materialize" semua metadata
+  // dulu sebelum tahap ekstraksi mulai — bikin idle time besar dan pakai memori 2x.
   console.log();
-  sep("Tahap 1/2 · Ambil metadata transaksi");
-  const txMetas = [];
+  sep("Pipeline · Ambil metadata + ekstrak R/S/Z");
+  const allSigs = [];
+  const errors = [];
   const metaErrors = [];
-  const startMeta = Date.now();
+  let metaOk = 0;
+  const startTs = Date.now();
+  drawProgress(0, txids.length, startTs);
   await runWithConcurrency(
     txids,
     concurrency,
     async (txid) => {
+      let meta;
       try {
-        const meta = await esploraFetch(base, "/tx/" + txid);
-        txMetas.push(meta);
+        meta = await esploraFetch(base, "/tx/" + txid);
+        metaOk++;
       } catch (e) {
         metaErrors.push(txid.slice(0, 12) + "…: " + e.message);
+        return null;
       }
-    },
-    (done) => drawProgress(done, txids.length, startMeta, "metadata")
-  );
-  process.stdout.write("\r\x1b[K");
-  console.log(
-    c(C.green, "  " + txMetas.length + " metadata OK") +
-    (metaErrors.length ? c(C.yellow, "  " + metaErrors.length + " gagal") : "")
-  );
-
-  // Ekstrak signature dari semua input setiap tx
-  console.log();
-  sep("Tahap 2/2 · Ekstrak R/S/Z dari setiap input");
-  const allSigs = [];
-  const errors = [];
-  const startTs = Date.now();
-  drawProgress(0, txMetas.length, startTs);
-  await runWithConcurrency(
-    txMetas,
-    concurrency,
-    async (tx) => {
-      const r = await processTxAllInputs(tx, base);
+      const r = await processTxAllInputs(meta, base);
       if (r.err) errors.push(r.err);
       for (const s of r.sigs) { s.index = allSigs.length; allSigs.push(s); }
       return r;
     },
-    (done, tx) => drawProgress(done, txMetas.length, startTs, tx.txid.slice(0, 16) + "…")
+    (done) => drawProgress(done, txids.length, startTs, "fetch+extract")
   );
   process.stdout.write("\r\x1b[K");
   const elapsed = ((Date.now() - startTs) / 1000).toFixed(1);
   console.log(
     c(C.green, "  Selesai " + elapsed + " dtk — ") +
     c(C.bold, allSigs.length + " signature") +
-    c(C.gray, " dari " + txMetas.length + " tx")
+    c(C.gray, " dari " + metaOk + " tx") +
+    (metaErrors.length ? c(C.yellow, "  · " + metaErrors.length + " meta gagal") : "")
   );
   if (errors.length) {
     console.log(c(C.yellow, "  " + errors.length + " error:"));
@@ -2556,23 +2606,36 @@ async function runDaemon(opts = {}) {
   }
 
   // ---- WebSocket "kick" untuk realtime: kalau ada update baru, potong sleep ----
+  // Reconnect pakai exponential backoff + jitter supaya tidak hammering provider
+  // saat WS down. Backoff direset begitu koneksi sukses (open).
   let ws = null;
-  let wsKick = null;          // resolve fn untuk Promise sleep saat ini
+  let wsKick = null;            // resolve fn untuk Promise sleep saat ini
   let wsConnected = false;
+  let wsReconnectAttempt = 0;
+  let wsReconnectTimer = null;
   function setupWebSocket() {
     if (!realtime) return;
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
     try {
       const wsUrl = base.replace(/^http/i, "ws").replace(/\/api\/?$/, "") + "/api/v1/ws";
       ws = new WebSocket(wsUrl);
       ws.on("open", () => {
         wsConnected = true;
+        wsReconnectAttempt = 0;
         try {
           ws.send(JSON.stringify({ action: "want", data: ["blocks", "mempool-blocks", "stats"] }));
         } catch {}
       });
       ws.on("message", () => { if (wsKick) { const k = wsKick; wsKick = null; k(); } });
-      ws.on("close", () => { wsConnected = false; if (running) setTimeout(setupWebSocket, 5000); });
-      ws.on("error", () => { /* abaikan, fallback polling */ });
+      ws.on("close", () => {
+        wsConnected = false;
+        if (!running) return;
+        wsReconnectAttempt++;
+        const exp = Math.min(30_000, 1000 * 2 ** Math.min(wsReconnectAttempt - 1, 5));
+        const wait = Math.floor(exp * (0.5 + Math.random() * 0.5));
+        wsReconnectTimer = setTimeout(setupWebSocket, wait);
+      });
+      ws.on("error", () => { /* abaikan, akan ditangani lewat 'close' + backoff */ });
     } catch { /* fallback ke polling */ }
   }
   setupWebSocket();
@@ -2612,15 +2675,20 @@ async function runDaemon(opts = {}) {
         if (Array.isArray(all)) freshTxids = all.filter((id) => !seenTxids.has(id)).slice(0, limitPerCycle);
       } else {
         const blocks = await esploraFetch(base, "/blocks");
-        for (const blk of (blocks || [])) {
-          if (freshTxids.length >= limitPerCycle) break;
-          try {
-            const tids = await esploraFetch(base, "/block/" + blk.id + "/txids");
-            for (const id of tids) {
-              if (!seenTxids.has(id)) freshTxids.push(id);
-              if (freshTxids.length >= limitPerCycle) break;
-            }
-          } catch {}
+        // Fetch txid list per blok paralel (kalau backend kasih banyak blok terbaru),
+        // hasil tetap diproses urut blok untuk preserve order.
+        const blkList = (blocks || []).slice(0, Math.max(1, Math.min(10, concurrency)));
+        const blkTxids = new Array(blkList.length);
+        await runWithConcurrency(blkList, concurrency, async (blk, idx) => {
+          try { blkTxids[idx] = await esploraFetch(base, "/block/" + blk.id + "/txids"); }
+          catch { blkTxids[idx] = null; }
+        }, null);
+        outer: for (const tids of blkTxids) {
+          if (!Array.isArray(tids)) continue;
+          for (const id of tids) {
+            if (!seenTxids.has(id)) freshTxids.push(id);
+            if (freshTxids.length >= limitPerCycle) break outer;
+          }
         }
       }
     } catch (e) {
@@ -2806,6 +2874,7 @@ async function runDaemon(opts = {}) {
 
   // ---- Cleanup ----
   saveSeenSnapshot(seenTxids);   // simpan snapshot terakhir
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   if (ws) { try { ws.removeAllListeners(); ws.close(); } catch {} }
   for (const s of _hitsStreams.values()) { try { s.end(); } catch {} }
   _hitsStreams.clear();

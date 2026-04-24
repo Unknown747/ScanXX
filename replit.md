@@ -6,7 +6,7 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - Node.js >= 18 (ESM, `"type": "module"`)
 - `@noble/curves` (secp256k1), `@noble/hashes` (sha256, ripemd160)
 - `undici` (HTTP/1.1 keep-alive Agent untuk fetch), `ws` (WebSocket realtime)
-- Tanpa framework web, tanpa server. Single-file CLI (~2820 baris).
+- Tanpa framework web, tanpa server. Single-file CLI (~3000 baris).
 
 ## Struktur
 - `index.js` — seluruh CLI (single file, semua logic + UI)
@@ -85,17 +85,22 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - Retry dengan jitter + `Retry-After` header (anti-429)
 - Daily NDJSON cache: 1 file/hari menggantikan ribuan file kecil (jauh lebih cepat di filesystem CoW)
 - Bounded daemon state (LRU seenTxids, time-window sigPool) — daemon bisa jalan berhari-hari tanpa OOM
+- **Bounded `_txIndex`**: LRUMap cap 50k entri (`cache.txIndexCap`) — daemon long-run tidak meledakkan heap saat NDJSON shard jadi gemuk
 - Persisted seenTxids snapshot — restart daemon tidak re-scan
 - Telegram fire-and-forget — notify tidak nge-block daemon loop
-- WebSocket realtime mempool.space (opsional, fallback otomatis ke polling)
+- WebSocket realtime mempool.space (opsional, fallback otomatis ke polling) dengan **exponential backoff + jitter** (cap 30 dtk) untuk reconnect
 - Auto terminal width detection
 - `detectReuse` O(n) via Map grouping per R (inner pair-loop hanya per group)
 - Resume scan address (state file per address di `.btc-cache/`) — Ctrl+C lalu lanjut tanpa kehilangan progress
 - `--profile` flag: tampilkan timing per fase di akhir run (label `http`, dll)
+- **Hot-path micro-opts**: `_HEX[256]` lookup table (`bytesToHex`), `bytesToBigInt(b)` langsung dari Uint8Array (skip hex roundtrip di sighash/Z-compute), `u32le/u64le` pakai scratch buffer + fast number-path
+- **BIP143 memoization**: `hashPrevouts/hashSequence/hashOutputs` di-cache per-tx via `bip143Context()` — hemat banyak SHA256d kalau tx punya >1 input
+- **scanExplore single-pipeline**: fetch metadata + ekstrak R/S/Z digabung dalam 1 jalur konkuren (sebelumnya 2 fase serial bikin idle time besar)
+- **Daemon block-mode parallel**: fetch txid list per blok pakai `runWithConcurrency` (sebelumnya serial per blok), urutan tetap dijaga
 
 ## Konfigurasi
 - `config.json` (opsional): `api`, `concurrency`, `hitsFile`,
-  `cache.{enabled, listMaxAgeHours, txMaxAgeHours, pruneOnStart}`,
+  `cache.{enabled, listMaxAgeHours, txMaxAgeHours, pruneOnStart, txIndexCap}`,
   `daemon.{realtime, seenLimit, poolMaxAgeHours, rateLimit, watchFile}`,
   `telegram.{enabled, botToken, chatId, notifyOnLiveOnly}`.
 - File watchlist: 1 address per baris, baris kosong & `# komentar` diabaikan.
