@@ -5,7 +5,8 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 ## Stack
 - Node.js >= 18 (ESM, `"type": "module"`)
 - `@noble/curves` (secp256k1), `@noble/hashes` (sha256, ripemd160)
-- Tanpa framework web, tanpa server. Single-file CLI (~2540 baris).
+- `undici` (HTTP/1.1 keep-alive Agent untuk fetch), `ws` (WebSocket realtime)
+- Tanpa framework web, tanpa server. Single-file CLI (~2820 baris).
 
 ## Struktur
 - `index.js` — seluruh CLI (single file, semua logic + UI)
@@ -15,7 +16,8 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - `config.json` — konfigurasi opsional (di-gitignore)
 
 ## Visual / UI Theme
-- Lebar W=74, tema emas/Bitcoin (gold, orange, yellow)
+- Lebar W=auto (clamp 60..120 dari `process.stdout.columns`, fallback 74)
+- Tema emas/Bitcoin (gold, orange, yellow)
 - Banner: kotak `╔═╗` double-line
 - `header(title, sub)` — header kotak per sub-command
 - `sep(label)` — separator baris tipis `┄`
@@ -26,8 +28,10 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 ## Default
 - API: `https://mempool.space/api`
 - Concurrency scan address: 8
-- TTL cache daftar tx address: 6 jam; cache hex tx: permanen
+- TTL cache daftar tx address: 6 jam
+- TTL cache hex tx: 48 jam (auto-prune saat startup)
 - Hits file: `hits.txt`
+- HTTP keep-alive: pool 32 koneksi per origin (undici Agent global)
 
 ## Perintah utama
 - `node index.js` — menu interaktif (pilihan 0-9, C)
@@ -37,7 +41,7 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - `node index.js sig --r --s --z [--pub]`
 - `node index.js reuse <file.json>`
 - `node index.js explore [--mode mempool|blocks] [--limit N]` — scan tx dari explorer
-- `node index.js daemon [--mode mempool|blocks] [--interval <dtk>] [--limit N]` — loop otomatis + alert R-reuse
+- `node index.js daemon [--mode mempool|blocks] [--interval <dtk>] [--limit N] [--realtime]` — loop otomatis + alert R-reuse (`--realtime` = WebSocket mempool.space, kick siklus saat ada update)
 - `node index.js stats [logfile] [--date YYYY-MM-DD]`
 - `node index.js clear-cache`
 - Flag global: `--api`, `--out`, `--hits`, `--verbose`, `--no-cache`, `--limit`, `--mode`, `--interval`
@@ -55,18 +59,38 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - C: Hapus Cache
 - 0: Keluar
 
-## Daemon (runDaemon)
+## Daemon (runDaemon) — bounded state
 - Loop tiap N detik (default 60), ambil txids baru dari mempool atau blok terbaru
-- Track `seenTxids` Set supaya tidak proses tx yang sama dua kali
-- Akumulasi `sigPool` lintas siklus untuk deteksi R-reuse lintas tx
+- `seenTxids` = LRUSet (cap `daemon.seenLimit`, default 200k) — memory-bounded
+- `sigPool` di-evict by waktu (cutoff `daemon.poolMaxAgeHours`, default 24 jam)
+- Realtime opsional via WebSocket `wss://mempool.space/api/v1/ws` — pesan WS "kick" memotong sleep agar siklus jalan segera
+- Append hits via `WriteStream` (tidak block event loop seperti `appendFileSync`)
 - Alert di terminal + simpan ke hits file + Telegram jika R-reuse ditemukan
-- Countdown timer countdown antar siklus, Ctrl+C untuk berhenti gracefully
+- Countdown timer antar siklus, Ctrl+C untuk berhenti gracefully (cleanup WS + stream)
 - Ringkasan akhir: total siklus, tx, sig, hit
+
+## Cache (daily NDJSON shards)
+- Cache hex tx disimpan di `.btc-cache/tx-daily/tx-YYYY-MM-DD.ndjson`
+  (1 baris per tx: `{"t":"<txid>","h":"<hex>"}`)
+- Index in-memory `Map<txid,hex>` dibangun lazy saat cache hit pertama
+- Auto-prune: file shard yang lebih tua dari `cache.txMaxAgeHours` (default 48 jam) dihapus saat startup
+- Backward-compat: kalau folder lama `.btc-cache/tx/<txid>.hex` masih ada, dibaca otomatis & ikut diprune saat startup
+
+## Optimasi performa
+- HTTP keep-alive: `undici` Agent global (pool 32 koneksi), hindari handshake TCP+TLS berulang
+- Token-bucket rate limiter per host (aktif jika `daemon.rateLimit > 0`)
+- Retry dengan jitter + `Retry-After` header (anti-429)
+- Daily NDJSON cache: 1 file/hari menggantikan ribuan file kecil (jauh lebih cepat di filesystem CoW)
+- Bounded daemon state (LRU seenTxids, time-window sigPool) — daemon bisa jalan berhari-hari tanpa OOM
+- WebSocket realtime mempool.space (opsional, fallback otomatis ke polling)
+- Auto terminal width detection
+- `detectReuse` O(n) via Map grouping per R (inner pair-loop hanya per group)
 
 ## Konfigurasi
 - `config.json` (opsional): `api`, `concurrency`, `hitsFile`,
-  `cache.{enabled,listMaxAgeHours}`,
-  `telegram.{enabled,botToken,chatId,notifyOnLiveOnly}`.
+  `cache.{enabled, listMaxAgeHours, txMaxAgeHours, pruneOnStart}`,
+  `daemon.{realtime, seenLimit, poolMaxAgeHours, rateLimit}`,
+  `telegram.{enabled, botToken, chatId, notifyOnLiveOnly}`.
 - Telegram `notifyTelegram()` dipanggil saat ada hit R-reuse.
 
 ## Roadmap

@@ -2,9 +2,26 @@
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 } from "@noble/hashes/sha256";
 import { ripemd160 } from "@noble/hashes/ripemd160";
-import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
+import {
+  readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync, rmSync,
+  renameSync, statSync, readdirSync, createWriteStream,
+} from "node:fs";
+import { promises as fsp } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { Agent, setGlobalDispatcher } from "undici";
+import WebSocket from "ws";
+
+// ---- HTTP Agent global: keep-alive + connection pool ----
+// Mengurangi overhead handshake TCP+TLS untuk ratusan/ribuan request ke mempool.space.
+setGlobalDispatcher(new Agent({
+  connections: 32,            // ukuran pool per origin
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+  pipelining: 1,
+  headersTimeout: 30_000,
+  bodyTimeout: 60_000,
+}));
 
 // ============================================================
 // Config (config.json di root, semua field opsional)
@@ -16,7 +33,18 @@ const DEFAULT_CONFIG = {
   hitsFile: "hits.txt",
   logFile: "scan.log",
   logEnabled: true,
-  cache: { enabled: true, listMaxAgeHours: 6 },
+  cache: {
+    enabled: true,
+    listMaxAgeHours: 6,         // TTL cache daftar tx address
+    txMaxAgeHours: 48,          // TTL cache hex tx (auto-prune ~2 hari)
+    pruneOnStart: true,         // bersihkan cache lama saat startup
+  },
+  daemon: {
+    realtime: false,            // pakai WebSocket mempool.space (vs polling)
+    seenLimit: 200_000,         // batas memori `seenTxids`
+    poolMaxAgeHours: 24,        // sig di pool > N jam akan dibuang
+    rateLimit: 0,               // request/dtk (0 = nonaktif)
+  },
   telegram: { enabled: false, botToken: "", chatId: "", notifyOnLiveOnly: true },
 };
 function loadConfig() {
@@ -27,6 +55,7 @@ function loadConfig() {
       ...DEFAULT_CONFIG,
       ...raw,
       cache: { ...DEFAULT_CONFIG.cache, ...(raw.cache || {}) },
+      daemon: { ...DEFAULT_CONFIG.daemon, ...(raw.daemon || {}) },
       telegram: { ...DEFAULT_CONFIG.telegram, ...(raw.telegram || {}) },
     };
   } catch (e) {
@@ -503,7 +532,12 @@ const C = {
 
 const useColor = !process.env.NO_COLOR && (process.stdout.isTTY || !!process.env.FORCE_COLOR);
 const c = (col, s) => (useColor ? col + s + C.reset : s);
-const W = 74;
+// Auto-detect lebar terminal, clamp 60..120 (default 74)
+const W = (() => {
+  const cols = (process.stdout && process.stdout.columns) || 0;
+  if (!cols) return 74;
+  return Math.min(120, Math.max(60, cols - 2));
+})();
 
 // ---- Helper: panjang string tanpa escape warna (akurat lebar terminal) ----
 const isWideCodePoint = (cp) => {
@@ -1163,6 +1197,59 @@ const RETRY = {
 };
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
+// ---- LRU Set (untuk seenTxids di daemon, batasi memori) ----
+class LRUSet {
+  constructor(max) { this.max = max; this.m = new Map(); }
+  has(k) { return this.m.has(k); }
+  add(k) {
+    if (this.m.has(k)) return;
+    this.m.set(k, 1);
+    if (this.m.size > this.max) {
+      const it = this.m.keys().next();
+      if (!it.done) this.m.delete(it.value);
+    }
+  }
+  get size() { return this.m.size; }
+}
+
+// ---- Append stream ke hits file (hindari appendFileSync di hot path daemon) ----
+const _hitsStreams = new Map(); // path -> WriteStream
+function appendHit(path, text) {
+  let s = _hitsStreams.get(path);
+  if (!s) { s = createWriteStream(path, { flags: "a" }); _hitsStreams.set(path, s); }
+  s.write(text);
+}
+
+// ---- Rate limiter (token bucket sederhana, per host) ----
+// Dipakai untuk membatasi req/dtk supaya tidak kena 429 dari mempool.space.
+// Aktif jika CONFIG.daemon.rateLimit > 0 atau --rate-limit <n> dipakai.
+const _rateBuckets = new Map();   // host -> { tokens, last, capacity, refillPerMs }
+function _getBucket(host, ratePerSec) {
+  if (!ratePerSec || ratePerSec <= 0) return null;
+  let b = _rateBuckets.get(host);
+  if (!b || b.capacity !== ratePerSec) {
+    b = { tokens: ratePerSec, last: Date.now(), capacity: ratePerSec, refillPerMs: ratePerSec / 1000 };
+    _rateBuckets.set(host, b);
+  }
+  return b;
+}
+async function rateLimitWait(url) {
+  const ratePerSec = (CONFIG.daemon && CONFIG.daemon.rateLimit) || 0;
+  if (!ratePerSec) return;
+  let host;
+  try { host = new URL(url).host; } catch { return; }
+  const b = _getBucket(host, ratePerSec);
+  if (!b) return;
+  while (true) {
+    const now = Date.now();
+    b.tokens = Math.min(b.capacity, b.tokens + (now - b.last) * b.refillPerMs);
+    b.last = now;
+    if (b.tokens >= 1) { b.tokens -= 1; return; }
+    const wait = Math.ceil((1 - b.tokens) / b.refillPerMs);
+    await sleep(wait);
+  }
+}
+
 // Fetch dengan timeout (AbortController) supaya koneksi hang tidak menggantung selamanya.
 async function fetchWithTimeout(url, opts = {}, timeoutMs = RETRY.timeoutMs) {
   const ctrl = new AbortController();
@@ -1179,6 +1266,7 @@ async function esploraFetch(base, path) {
   let lastErr;
   for (let attempt = 1; attempt <= RETRY.maxAttempts; attempt++) {
     try {
+      await rateLimitWait(url);
       const r = await fetchWithTimeout(url, { headers: { "user-agent": "btc-sig-analyzer/1.0" } });
       if (r.ok) {
         const ct = r.headers.get("content-type") || "";
@@ -1216,29 +1304,112 @@ async function esploraFetch(base, path) {
 }
 
 const CACHE_DIR = ".btc-cache";
-const CACHE_TX = CACHE_DIR + "/tx";
+const CACHE_TX = CACHE_DIR + "/tx";          // legacy: file-per-tx (auto-migrated/dibaca jika ada)
+const CACHE_TX_DAILY = CACHE_DIR + "/tx-daily"; // baru: NDJSON shard per hari
 const CACHE_LIST = CACHE_DIR + "/addr";
 let CACHE_ENABLED = CONFIG.cache.enabled;
 let CACHE_STATS = { hexHits: 0, hexMisses: 0, listHits: 0, listMisses: 0 };
 
 function ensureCacheDir() {
   if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR);
-  if (!existsSync(CACHE_TX)) mkdirSync(CACHE_TX);
+  if (!existsSync(CACHE_TX_DAILY)) mkdirSync(CACHE_TX_DAILY);
   if (!existsSync(CACHE_LIST)) mkdirSync(CACHE_LIST);
+}
+
+// ---- Cache TX hex: shard NDJSON per hari (file/hari) ----
+// Format file: tx-YYYY-MM-DD.ndjson, tiap baris = {"t":"<txid>","h":"<hex>"}
+// Auto-prune file > CONFIG.cache.txMaxAgeHours saat startup.
+const _shardName = (d = new Date()) => {
+  const p = (n) => String(n).padStart(2, "0");
+  return "tx-" + d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + ".ndjson";
+};
+let _txIndex = null;          // Map<txid, hex> in-memory (lazy build)
+let _txWriteStream = null;    // append stream untuk shard hari ini
+let _txWriteShardName = null; // nama shard yang lagi dipakai stream
+
+function _buildTxIndex() {
+  _txIndex = new Map();
+  if (!existsSync(CACHE_TX_DAILY)) return;
+  let files = [];
+  try { files = readdirSync(CACHE_TX_DAILY); } catch { return; }
+  for (const f of files) {
+    if (!f.startsWith("tx-") || !f.endsWith(".ndjson")) continue;
+    const fpath = CACHE_TX_DAILY + "/" + f;
+    let raw;
+    try { raw = readFileSync(fpath, "utf8"); } catch { continue; }
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      try {
+        const o = JSON.parse(line);
+        if (o && o.t && o.h) _txIndex.set(o.t, o.h);
+      } catch {}
+    }
+  }
+  // Migrasi opsional: baca cache lama file-per-tx (dipakai sekali, lalu cukup biarkan)
+  if (existsSync(CACHE_TX)) {
+    let legacy = [];
+    try { legacy = readdirSync(CACHE_TX); } catch {}
+    for (const f of legacy) {
+      if (!f.endsWith(".hex")) continue;
+      const txid = f.slice(0, -4);
+      if (_txIndex.has(txid)) continue;
+      try { _txIndex.set(txid, readFileSync(CACHE_TX + "/" + f, "utf8").trim()); } catch {}
+    }
+  }
+}
+
+function _ensureTxStream() {
+  ensureCacheDir();
+  const want = _shardName();
+  if (_txWriteStream && _txWriteShardName === want) return _txWriteStream;
+  if (_txWriteStream) { try { _txWriteStream.end(); } catch {} }
+  _txWriteShardName = want;
+  _txWriteStream = createWriteStream(CACHE_TX_DAILY + "/" + want, { flags: "a" });
+  return _txWriteStream;
+}
+
+function pruneOldCache(maxAgeHours) {
+  if (!existsSync(CACHE_TX_DAILY)) return 0;
+  const cutoff = Date.now() - maxAgeHours * 3600 * 1000;
+  let removed = 0;
+  let files = [];
+  try { files = readdirSync(CACHE_TX_DAILY); } catch { return 0; }
+  for (const f of files) {
+    if (!f.startsWith("tx-") || !f.endsWith(".ndjson")) continue;
+    const fpath = CACHE_TX_DAILY + "/" + f;
+    try {
+      const st = statSync(fpath);
+      if (st.mtimeMs < cutoff) { rmSync(fpath, { force: true }); removed++; }
+    } catch {}
+  }
+  // Buang juga cache legacy file-per-tx yang umurnya > cutoff
+  if (existsSync(CACHE_TX)) {
+    let legacy = [];
+    try { legacy = readdirSync(CACHE_TX); } catch {}
+    for (const f of legacy) {
+      const fpath = CACHE_TX + "/" + f;
+      try {
+        const st = statSync(fpath);
+        if (st.mtimeMs < cutoff) { rmSync(fpath, { force: true }); removed++; }
+      } catch {}
+    }
+  }
+  return removed;
 }
 
 async function fetchTxHexCached(base, txid) {
   if (CACHE_ENABLED) {
-    const file = CACHE_TX + "/" + txid + ".hex";
-    if (existsSync(file)) {
-      CACHE_STATS.hexHits++;
-      return readFileSync(file, "utf8").trim();
-    }
+    if (_txIndex === null) _buildTxIndex();
+    const cached = _txIndex.get(txid);
+    if (cached) { CACHE_STATS.hexHits++; return cached; }
   }
   CACHE_STATS.hexMisses++;
   const hex = await esploraFetch(base, "/tx/" + txid + "/hex");
   if (CACHE_ENABLED) {
-    try { ensureCacheDir(); writeFileSync(CACHE_TX + "/" + txid + ".hex", hex); } catch {}
+    try {
+      _ensureTxStream().write(JSON.stringify({ t: txid, h: hex }) + "\n");
+      if (_txIndex) _txIndex.set(txid, hex);
+    } catch {}
   }
   return hex;
 }
@@ -1904,7 +2075,7 @@ function help() {
   row("node index.js explore",                   "Scan tx langsung dari explorer");
   sub("--mode mempool|blocks    --limit <n>  (default: mempool, 100 tx)");
   row("node index.js daemon",                    "Scan otomatis loop (alert R-reuse)");
-  sub("--mode mempool|blocks  --interval <dtk>  --limit <n/siklus>");
+  sub("--mode mempool|blocks  --interval <dtk>  --limit <n/siklus>  --realtime");
   row("node index.js tx <hex>",                  "Analisis raw hex transaksi");
   row("node index.js tx-file <path>",            "Analisis raw hex dari file");
   row("node index.js sig --r --s --z [--pub]",   "Analisis 1 signature manual");
@@ -2131,8 +2302,10 @@ async function interactiveMenu() {
       const dmode = dsrc === "2" ? "blocks" : "mempool";
       const dIntervalStr = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Interval detik [default 60]   : "))).trim();
       const dLimitStr    = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Maks TX/siklus [default 200]  : "))).trim();
+      const dRtStr       = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Realtime WebSocket? [y/N]     : "))).trim().toLowerCase();
       const dInterval = dIntervalStr ? Math.max(10, parseInt(dIntervalStr, 10) || 60) : 60;
       const dLimit    = dLimitStr    ? Math.max(1,  parseInt(dLimitStr,    10) || 200) : 200;
+      const dRealtime = dRtStr === "y" || dRtStr === "ya" || dRtStr === "yes";
       rl.close();
       await runDaemon({
         api:         CONFIG.api || DEFAULT_API,
@@ -2141,6 +2314,7 @@ async function interactiveMenu() {
         mode:        dmode,
         interval:    dInterval,
         limit:       dLimit,
+        realtime:    dRealtime,
       });
     } else {
       rl.close();
@@ -2276,14 +2450,39 @@ async function runDaemon(opts = {}) {
   const intervalSec = Math.max(10, opts.interval || 60);
   const hitsFile    = opts.hitsFile || CONFIG.hitsFile;
   const concurrency = opts.concurrency || CONFIG.concurrency;
+  const realtime    = opts.realtime != null ? !!opts.realtime : !!(CONFIG.daemon && CONFIG.daemon.realtime);
+  const seenLimit   = (CONFIG.daemon && CONFIG.daemon.seenLimit) || 200_000;
+  const poolMaxAgeMs = ((CONFIG.daemon && CONFIG.daemon.poolMaxAgeHours) || 24) * 3600 * 1000;
 
-  const seenTxids = new Set();    // hindari proses tx yang sama dua kali
-  const sigPool   = [];           // akumulasi signature lintas siklus
+  const seenTxids = new LRUSet(seenLimit);  // bounded set untuk hindari duplikat tx
+  const sigPool   = [];                     // pool signature, dievict by waktu
   let cycle = 0, totalTx = 0, totalSigs = 0, totalHits = 0;
   let running = true;
 
-  process.on("SIGINT",  () => { running = false; });
-  process.on("SIGTERM", () => { running = false; });
+  // ---- WebSocket "kick" untuk realtime: kalau ada update baru, potong sleep ----
+  let ws = null;
+  let wsKick = null;          // resolve fn untuk Promise sleep saat ini
+  let wsConnected = false;
+  function setupWebSocket() {
+    if (!realtime) return;
+    try {
+      const wsUrl = base.replace(/^http/i, "ws").replace(/\/api\/?$/, "") + "/api/v1/ws";
+      ws = new WebSocket(wsUrl);
+      ws.on("open", () => {
+        wsConnected = true;
+        try {
+          ws.send(JSON.stringify({ action: "want", data: ["blocks", "mempool-blocks", "stats"] }));
+        } catch {}
+      });
+      ws.on("message", () => { if (wsKick) { const k = wsKick; wsKick = null; k(); } });
+      ws.on("close", () => { wsConnected = false; if (running) setTimeout(setupWebSocket, 5000); });
+      ws.on("error", () => { /* abaikan, fallback polling */ });
+    } catch { /* fallback ke polling */ }
+  }
+  setupWebSocket();
+
+  process.on("SIGINT",  () => { running = false; if (wsKick) { const k = wsKick; wsKick = null; k(); } });
+  process.on("SIGTERM", () => { running = false; if (wsKick) { const k = wsKick; wsKick = null; k(); } });
 
   console.log();
   banner();
@@ -2296,6 +2495,7 @@ async function runDaemon(opts = {}) {
   kv("Interval",  intervalSec + " detik per siklus", C.white);
   kv("Maks TX",   limitPerCycle + " tx per siklus", C.white);
   kv("Paralel",   concurrency + " request", C.dim);
+  kv("Realtime",  realtime ? "WebSocket aktif (mempool.space)" : "Polling biasa", realtime ? C.green : C.dim);
   kv("API",       base, C.dim);
   kv("Hits file", hitsFile, C.dim);
   console.log();
@@ -2361,9 +2561,19 @@ async function runDaemon(opts = {}) {
     totalTx   += freshTxids.length;
     totalSigs += cycleSigs.length;
 
-    // Tambahkan ke pool global (beri index unik)
+    // ---- Evict signature lama dari pool (time-window) ----
+    if (poolMaxAgeMs > 0 && sigPool.length) {
+      const cutoff = Date.now() - poolMaxAgeMs;
+      let drop = 0;
+      while (drop < sigPool.length && (sigPool[drop]._t || 0) < cutoff) drop++;
+      if (drop > 0) sigPool.splice(0, drop);
+    }
+
+    // Tambahkan ke pool global (beri index unik + timestamp untuk eviction)
+    const nowTs = Date.now();
     for (const s of cycleSigs) {
       s.index = sigPool.length;
+      s._t = nowTs;
       sigPool.push(s);
     }
 
@@ -2421,7 +2631,7 @@ async function runDaemon(opts = {}) {
                   c(C.dim, "R (nonce)     ") + c(C.yellow, r.slice(0, 32) + "…"),
                 ], C.green);
 
-                // Simpan ke hits file
+                // Simpan ke hits file (async write stream, tidak block event loop)
                 try {
                   const ts = new Date().toISOString();
                   const line = [
@@ -2431,7 +2641,7 @@ async function runDaemon(opts = {}) {
                     "Addr P2PKH: " + addrC, "Addr bc1  : " + addrS,
                     "R nonce   : " + r, "",
                   ].join("\n");
-                  appendFileSync(hitsFile, line);
+                  appendHit(hitsFile, line);
                 } catch {}
 
                 // Notifikasi Telegram
@@ -2460,21 +2670,34 @@ async function runDaemon(opts = {}) {
       "  pool=" + sigPool.length + "  seen=" + seenTxids.size
     ));
 
-    // ---- Tunggu interval berikutnya ----
+    // ---- Tunggu interval berikutnya (WS kick memotong sleep di mode realtime) ----
     if (running) {
-      const waitMsg = "  Menunggu " + intervalSec + "s sampai siklus berikutnya… (Ctrl+C untuk berhenti)";
+      const wsTag = realtime && wsConnected ? " [ws]" : "";
+      const waitMsg = "  Menunggu " + intervalSec + "s sampai siklus berikutnya…" + wsTag + " (Ctrl+C untuk berhenti)";
       process.stdout.write(c(C.dim, waitMsg));
-      const TICK = 1000;
-      let waited = 0;
-      while (waited < intervalSec * 1000 && running) {
-        await sleep(Math.min(TICK, intervalSec * 1000 - waited));
-        waited += TICK;
-        const rem = Math.max(0, Math.ceil((intervalSec * 1000 - waited) / 1000));
-        process.stdout.write("\r" + c(C.dim, waitMsg.replace("Menunggu " + intervalSec + "s", "Menunggu " + rem + "s ")) + "\x1b[K");
-      }
+      const totalMs = intervalSec * 1000;
+      const start = Date.now();
+      // Race: timer interval vs WS message kick
+      const kickPromise = new Promise((res) => { wsKick = res; });
+      const tick = async () => {
+        while (running) {
+          const elapsed = Date.now() - start;
+          if (elapsed >= totalMs) return;
+          const rem = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
+          process.stdout.write("\r" + c(C.dim, waitMsg.replace("Menunggu " + intervalSec + "s", "Menunggu " + rem + "s ")) + "\x1b[K");
+          await sleep(Math.min(1000, totalMs - elapsed));
+        }
+      };
+      await Promise.race([tick(), kickPromise]);
+      wsKick = null;
       process.stdout.write("\r\x1b[K");
     }
   }
+
+  // ---- Cleanup ----
+  if (ws) { try { ws.removeAllListeners(); ws.close(); } catch {} }
+  for (const s of _hitsStreams.values()) { try { s.end(); } catch {} }
+  _hitsStreams.clear();
 
   console.log();
   sep("Daemon dihentikan · " + new Date().toLocaleString("id-ID"));
@@ -2495,6 +2718,13 @@ async function main() {
       console.log("Tidak ada cache untuk dihapus.");
     }
     return;
+  }
+  // Auto-prune cache TX hex yang lebih tua dari txMaxAgeHours (default 48 jam = 2 hari)
+  if (CACHE_ENABLED && CONFIG.cache.pruneOnStart && cmd !== "help" && cmd !== "stats") {
+    try {
+      const removed = pruneOldCache(CONFIG.cache.txMaxAgeHours || 48);
+      if (removed > 0) logScan("INFO", "auto-prune cache: " + removed + " file dihapus (ttl=" + (CONFIG.cache.txMaxAgeHours || 48) + "h)");
+    } catch {}
   }
   if (!cmd) {
     await interactiveMenu();
@@ -2568,6 +2798,7 @@ async function main() {
       limit:       limitVal    ? Math.max(1,  parseInt(limitVal, 10))    : 200,
       hitsFile:    getOpt("hits") || CONFIG.hitsFile,
       concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
+      realtime:    hasFlag("realtime") ? true : (CONFIG.daemon && CONFIG.daemon.realtime),
     });
   } else {
     console.error(c(C.red, "Perintah tidak dikenal: " + cmd));
