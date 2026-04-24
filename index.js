@@ -478,101 +478,143 @@ function recoverPrivateKey(r, s1, z1, s2, z2) {
 // ============================================================
 const padHex = (n, len = 64) =>
   n.toString(16).padStart(len, "0");
+
 const C = {
-  reset: "\x1b[0m",
-  bold: "\x1b[1m",
-  dim: "\x1b[2m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  blue: "\x1b[34m",
-  cyan: "\x1b[36m",
-  magenta: "\x1b[35m",
-  gray: "\x1b[90m",
-  bgBlue: "\x1b[44m",
-  bgGreen: "\x1b[42m",
-  bgRed: "\x1b[41m",
+  reset:     "\x1b[0m",
+  bold:      "\x1b[1m",
+  dim:       "\x1b[2m",
+  italic:    "\x1b[3m",
+  underline: "\x1b[4m",
+  red:       "\x1b[31m",
+  green:     "\x1b[32m",
+  yellow:    "\x1b[33m",
+  gold:      "\x1b[33m",
+  blue:      "\x1b[34m",
+  magenta:   "\x1b[35m",
+  cyan:      "\x1b[36m",
+  white:     "\x1b[97m",
+  gray:      "\x1b[90m",
+  orange:    "\x1b[38;5;208m",
+  bgRed:     "\x1b[41m",
+  bgGreen:   "\x1b[42m",
+  bgBlue:    "\x1b[44m",
+  bgOrange:  "\x1b[48;5;208m",
 };
+
 const useColor = !process.env.NO_COLOR && (process.stdout.isTTY || !!process.env.FORCE_COLOR);
 const c = (col, s) => (useColor ? col + s + C.reset : s);
-const W = 64; // lebar visual default
+const W = 74;
 
+// ---- Helper: panjang string tanpa escape warna ----
+const visLen = (s) => s.replace(/\x1b\[[0-9;]*m/g, "").length;
+
+// ---- Separator ----
 const sep = (t = "") => {
   if (!t) {
-    console.log(c(C.gray, "─".repeat(W)));
+    console.log(c(C.gray, "  " + "─".repeat(W - 2)));
     return;
   }
-  const left = "─── ";
-  const right = " " + "─".repeat(Math.max(3, W - left.length - t.length - 1));
-  console.log(c(C.gray, left) + c(C.bold + C.cyan, t) + c(C.gray, right));
+  const prefix = "  ┄┄ ";
+  const suffix = " " + "┄".repeat(Math.max(2, W - prefix.length - visLen(t) - 1));
+  console.log(c(C.gray, prefix) + c(C.bold + C.yellow, t) + c(C.gray, suffix));
 };
 
-// Header berbingkai dengan judul (untuk memulai sebuah analisis)
+// ---- Header berbingkai double-line ----
 function header(title, subtitle) {
   const inner = W - 2;
-  const top = "╭" + "─".repeat(inner) + "╮";
-  const bot = "╰" + "─".repeat(inner) + "╯";
-  const pad = (s) => {
-    const visible = s.replace(/\x1b\[[0-9;]*m/g, "");
-    const space = Math.max(0, inner - visible.length - 2);
-    return "│ " + s + " ".repeat(space) + " │";
+  const top = "╔" + "═".repeat(inner) + "╗";
+  const div = "╠" + "═".repeat(inner) + "╣";
+  const bot = "╚" + "═".repeat(inner) + "╝";
+  const row = (s, col) => {
+    const vis = visLen(s);
+    const pad = Math.max(0, inner - vis - 2);
+    return c(col || C.yellow, "║ ") + s + " ".repeat(pad) + c(col || C.yellow, " ║");
   };
-  console.log(c(C.cyan, top));
-  console.log(c(C.cyan, "│ ") + c(C.bold + C.cyan, title.padEnd(inner - 2)) + c(C.cyan, " │"));
-  if (subtitle) console.log(c(C.cyan, pad(c(C.dim, subtitle))));
-  console.log(c(C.cyan, bot));
+  console.log(c(C.yellow + C.bold, top));
+  console.log(row(c(C.bold + C.white, "  " + title), C.yellow));
+  if (subtitle) {
+    console.log(c(C.yellow, div));
+    console.log(row(c(C.dim, "  " + subtitle), C.yellow));
+  }
+  console.log(c(C.yellow + C.bold, bot));
 }
 
-// Baris key-value dengan label rata kanan
+// ---- Key-Value dengan dot leader ----
 function kv(label, value, color) {
-  const lab = label.padEnd(14);
-  const val = color ? c(color, String(value)) : String(value);
-  console.log(c(C.gray, "  " + lab + " ") + c(C.gray, "│ ") + val);
+  const LAB = 16;
+  const lab = label.padEnd(LAB);
+  const dots = c(C.gray, " ··· ");
+  const val = color ? c(color, String(value)) : c(C.white, String(value));
+  console.log(c(C.gray, "  ") + c(C.dim, lab) + dots + val);
 }
 
-// Kotak penegasan (untuk blok private key yang dipulihkan)
+// ---- Kotak highlight (untuk private key & hit) ----
 function box(title, lines, accent) {
   accent = accent || C.green;
   const inner = W - 2;
   const top = "╔" + "═".repeat(inner) + "╗";
-  const mid = "╟" + "─".repeat(inner) + "╢";
+  const div = "╠" + "═".repeat(inner) + "╣";
   const bot = "╚" + "═".repeat(inner) + "╝";
-  const padLine = (s) => {
-    const visible = s.replace(/\x1b\[[0-9;]*m/g, "");
-    const space = Math.max(0, inner - visible.length - 2);
-    return c(accent, "║ ") + s + " ".repeat(space) + c(accent, " ║");
+  const row = (s) => {
+    const vis = visLen(s);
+    const pad = Math.max(0, inner - vis - 2);
+    return c(accent, "║ ") + s + " ".repeat(pad) + c(accent, " ║");
   };
   console.log(c(accent + C.bold, top));
-  console.log(padLine(c(accent + C.bold, title.padEnd(inner - 2))));
-  console.log(c(accent, mid));
-  for (const ln of lines) console.log(padLine(ln));
+  console.log(row(c(accent + C.bold, "  " + title)));
+  console.log(c(accent, div));
+  for (const ln of lines) console.log(row("  " + ln));
   console.log(c(accent + C.bold, bot));
 }
 
+// ---- Ikon ----
 const ICON = {
-  ok: useColor ? "\x1b[32m✓\x1b[0m" : "[v]",
-  err: useColor ? "\x1b[31m✗\x1b[0m" : "[x]",
-  warn: useColor ? "\x1b[33m⚠\x1b[0m" : "[!]",
-  info: useColor ? "\x1b[36mℹ\x1b[0m" : "[i]",
-  key: useColor ? "\x1b[33m🔑\x1b[0m" : "[KEY]",
-  money: useColor ? "\x1b[32m💰\x1b[0m" : "[$]",
-  alert: useColor ? "\x1b[31m🚨\x1b[0m" : "[!!]",
-  arrow: useColor ? "\x1b[36m›\x1b[0m" : ">",
+  ok:     useColor ? "\x1b[32m✔\x1b[0m"  : "[OK]",
+  err:    useColor ? "\x1b[31m✘\x1b[0m"  : "[ERR]",
+  warn:   useColor ? "\x1b[33m⚠\x1b[0m"  : "[!]",
+  info:   useColor ? "\x1b[36mℹ\x1b[0m"  : "[i]",
+  key:    useColor ? "\x1b[33m🔑\x1b[0m" : "[KEY]",
+  money:  useColor ? "\x1b[32m💰\x1b[0m" : "[$]",
+  alert:  useColor ? "\x1b[31m🚨\x1b[0m" : "[!!]",
+  arrow:  useColor ? "\x1b[33m❯\x1b[0m"  : ">",
+  btc:    useColor ? "\x1b[33m₿\x1b[0m"  : "BTC",
+  scan:   useColor ? "\x1b[36m⬡\x1b[0m"  : "[S]",
+  search: useColor ? "\x1b[36m⌕\x1b[0m"  : "[?]",
+  file:   useColor ? "\x1b[35m◈\x1b[0m"  : "[F]",
+  tool:   useColor ? "\x1b[90m◆\x1b[0m"  : "[T]",
+  live:   useColor ? "\x1b[32m●\x1b[0m"  : "[LIVE]",
+  dead:   useColor ? "\x1b[90m○\x1b[0m"  : "[DEAD]",
 };
 
+// ---- Banner utama ----
 function banner() {
   if (!useColor) {
-    console.log("btc-sig-analyzer — Bitcoin signature R/S/Z extractor");
+    console.log("=".repeat(W));
+    console.log(" BTC-SIG-ANALYZER  —  Bitcoin ECDSA Signature Analyzer & Key Recovery");
+    console.log("=".repeat(W));
     return;
   }
-  const lines = [
-    "╭──────────────────────────────────────────────────────────────╮",
-    "│  ₿  btc-sig-analyzer  •  ECDSA R/S/Z extractor & recovery   │",
-    "╰──────────────────────────────────────────────────────────────╯",
-  ];
-  console.log(c(C.cyan + C.bold, lines[0]));
-  console.log(c(C.cyan + C.bold, lines[1]));
-  console.log(c(C.cyan + C.bold, lines[2]));
+  const I = W - 2;
+  const ln = (s, col) => {
+    const pad = Math.max(0, I - visLen(s) - 2);
+    return c(col, "║ ") + s + " ".repeat(pad) + c(col, " ║");
+  };
+  const G = C.yellow + C.bold;
+  const D = C.gray;
+  console.log(c(G, "╔" + "═".repeat(I) + "╗"));
+  console.log(ln("", D));
+  console.log(ln(
+    c(C.yellow + C.bold, "  ₿  BTC-SIG-ANALYZER") +
+    c(C.gray, "  ·  ") +
+    c(C.white + C.bold, "Bitcoin ECDSA Signature Analyzer"),
+    C.yellow
+  ));
+  console.log(ln(
+    c(C.dim, "     Deteksi R-Reuse  ·  Ekstrak R/S/Z  ·  Pulihkan Private Key"),
+    C.yellow
+  ));
+  console.log(ln("", D));
+  console.log(c(G, "╚" + "═".repeat(I) + "╝"));
 }
 
 // ============================================================
@@ -1782,71 +1824,82 @@ async function analyzeByTxid(txid, opts = {}) {
 function help() {
   console.log();
   banner();
-  console.log(`
-${c(C.bold + C.cyan, "PENGGUNAAN")}
-  node index.js                         Mode interaktif (menu pilihan)
-  node index.js tx <hex>                Analisis raw transaksi (hex)
-  node index.js tx-file <path>          Analisis raw transaksi dari file (hex)
-  node index.js txid <txid>             Ambil & analisis tx via TXID (online)
-  node index.js address <addr>          Scan SEMUA tx dari address (online)
-                                         ekstrak R/S/Z, cari R-reuse otomatis
-  node index.js batch <file>            Scan banyak address dari file (1 baris = 1 addr,
-                                         baris '#' diabaikan sebagai komentar)
-  node index.js explore                 Scan tx LANGSUNG dari explorer tanpa input manual
-                                         --mode mempool   ambil tx dari mempool (default)
-                                         --mode blocks    ambil tx dari blok terbaru
-                                         --limit <n>      maks jumlah tx (default 100)
-  node index.js stats [logfile]         Ringkasan dari scan.log (jumlah scan, hit,
-                                         retry, error, top sumber retry/error)
-                                         opsi: --date YYYY-MM-DD (filter tanggal)
-  node index.js sig --r <hex> --s <hex> --z <hex> [--pub <hex>]
-                                         Analisis satu signature manual
-  node index.js reuse <file.json>       Cari R-reuse dari daftar signature JSON
-                                         Format: [{r,s,z,pubkey?}, ...]
-  node index.js help                    Tampilkan bantuan
+  console.log();
 
-Opsi:
-  --amount <i>=<satoshi>                 Nilai input ke-i (untuk 'tx' SegWit)
-  --api <url>                            Endpoint Esplora kustom
-                                         (default https://mempool.space/api)
-                                         testnet: https://mempool.space/testnet/api
-  --verbose                              Tampilkan tiap R/S/Z saat scan address
-  --out <file.json>                      Simpan hasil scan ke file JSON
-  --concurrency <n>                      Request paralel saat scan address (default 8)
-  --hits <file.txt>                      File untuk simpan hit R-reuse (default hits.txt)
-  --no-cache                             Nonaktifkan cache lokal
-  clear-cache                            Hapus seluruh isi folder .btc-cache/
+  const HL = W - 2;
+  const sect = (label) => {
+    const dash = "─".repeat(HL - 4 - visLen(label) - 2);
+    console.log(c(C.gray, "  ┌─ ") + c(C.bold + C.yellow, label) + c(C.gray, " " + dash + "┐"));
+  };
+  const sectEnd = () => console.log(c(C.gray, "  └" + "─".repeat(HL - 2) + "┘\n"));
+  const row = (cmd, desc) => {
+    const gap = Math.max(1, HL - 2 - visLen(cmd) - visLen(desc) - 2);
+    console.log(c(C.gray, "  │ ") + c(C.cyan, cmd) + " ".repeat(gap) + c(C.dim, desc) + c(C.gray, " │"));
+  };
+  const sub = (text) => {
+    console.log(c(C.gray, "  │  ") + c(C.dim, "  " + text) + " ".repeat(Math.max(0, HL - 4 - visLen(text) - 2)) + c(C.gray, "│"));
+  };
+  const flag = (f, desc) => {
+    const gap = Math.max(1, HL - 2 - visLen(f) - visLen(desc) - 2);
+    console.log(c(C.gray, "  │ ") + c(C.magenta, f) + " ".repeat(gap) + c(C.dim, desc) + c(C.gray, " │"));
+  };
+  const blank = () => console.log(c(C.gray, "  │" + " ".repeat(HL - 2) + "│"));
 
-Konfigurasi (config.json di root, opsional):
-  {
-    "api": "https://mempool.space/api",
-    "concurrency": 8,
-    "hitsFile": "hits.txt",
-    "logFile": "scan.log",
-    "logEnabled": true,
-    "cache": { "enabled": true, "listMaxAgeHours": 6 },
-    "telegram": {
-      "enabled": true,
-      "botToken": "123456:ABC...",
-      "chatId": "123456789",
-      "notifyOnLiveOnly": true
-    }
-  }
-  Bot Telegram dibuat lewat @BotFather; chatId via @userinfobot.
+  sect("PERINTAH");
+  row("node index.js",                           "Mode interaktif (menu)");
+  row("node index.js txid <txid>",               "Ambil & analisis tx via TXID");
+  row("node index.js address <addr>",            "Scan semua tx dari wallet, cari R-reuse");
+  row("node index.js batch <file>",              "Scan banyak address dari file");
+  row("node index.js explore",                   "Scan tx langsung dari explorer");
+  sub("--mode mempool|blocks    --limit <n>  (default: mempool, 100 tx)");
+  row("node index.js tx <hex>",                  "Analisis raw hex transaksi");
+  row("node index.js tx-file <path>",            "Analisis raw hex dari file");
+  row("node index.js sig --r <h> --s <h> --z <h>", "Analisis 1 signature manual");
+  row("node index.js reuse <file.json>",         "R-reuse dari [{r,s,z,pubkey?}]");
+  row("node index.js stats [logfile]",           "Ringkasan scan.log");
+  sub("--date YYYY-MM-DD   (filter tanggal)");
+  row("node index.js help",                      "Tampilkan bantuan ini");
+  sectEnd();
 
-Yang dianalisis dari setiap input:
-  • R, S          (komponen ECDSA dari DER signature)
-  • Z             (message hash / sighash)
-  • Public Key    (dari scriptSig atau witness)
-  • PubKey Hash   (HASH160 dari pubkey)
-  • Address       (P2PKH base58)
+  sect("OPSI GLOBAL");
+  flag("--api <url>",         "Endpoint Esplora kustom (default: mempool.space)");
+  flag("--concurrency <n>",   "Request paralel saat scan address (default: 8)");
+  flag("--hits <file.txt>",   "File simpan hit R-reuse (default: hits.txt)");
+  flag("--out <file.json>",   "Simpan hasil scan ke JSON");
+  flag("--verbose",           "Tampilkan tiap R/S/Z saat scan address");
+  flag("--no-cache",          "Nonaktifkan cache lokal");
+  flag("--amount <i>=<sat>",  "Nilai input ke-i dalam satoshi (untuk SegWit)");
+  flag("clear-cache",         "Hapus seluruh isi folder .btc-cache/");
+  sectEnd();
 
-Pemulihan Private Key:
-  Jika dua signature berbeda menggunakan nilai R yang sama (nonce reuse),
-  private key dapat dipulihkan secara matematis:
-    k = (z1 − z2) / (s1 − s2)  mod n
-    d = (s1·k − z1) / r        mod n
-`);
+  sect("YANG DIANALISIS");
+  blank();
+  const dataRow = (key, desc) => {
+    const content = "  " + key + "  " + desc;
+    const pad = Math.max(0, HL - 2 - visLen(content));
+    console.log(c(C.gray, "  │") + c(C.yellow, "  " + key) + c(C.dim, "  " + desc) + " ".repeat(pad) + c(C.gray, "│"));
+  };
+  dataRow("R, S      ", "Komponen ECDSA dari DER signature");
+  dataRow("Z         ", "Message hash / sighash (BIP143 atau legacy)");
+  dataRow("Public Key", "Dari scriptSig (legacy) atau witness (SegWit)");
+  dataRow("Address   ", "P2PKH (1...), P2WPKH (bc1q...), P2SH-P2WPKH (3...)");
+  blank();
+  sectEnd();
+
+  sect("RUMUS PEMULIHAN PRIVATE KEY");
+  blank();
+  const fmDesc = "Jika dua signature memakai nonce R yang sama:";
+  console.log(c(C.gray, "  │  ") + c(C.dim, fmDesc) + " ".repeat(HL - 4 - visLen(fmDesc)) + c(C.gray, "│"));
+  blank();
+  const f1 = "k  =  (z1 − z2) / (s1 − s2)  mod n";
+  const f2 = "d  =  (s1·k − z1) / r        mod n";
+  console.log(c(C.gray, "  │     ") + c(C.yellow + C.bold, f1) + " ".repeat(HL - 7 - visLen(f1)) + c(C.gray, "│"));
+  console.log(c(C.gray, "  │     ") + c(C.yellow + C.bold, f2) + " ".repeat(HL - 7 - visLen(f2)) + c(C.gray, "│"));
+  blank();
+  sectEnd();
+
+  console.log(c(C.dim, "  Konfigurasi: edit config.json di root project."));
+  console.log(c(C.dim, "  Telegram   : aktifkan di config.json → telegram.enabled = true\n"));
 }
 
 const rawArgv = process.argv.slice(2);
@@ -1873,33 +1926,70 @@ async function interactiveMenu() {
   try {
     console.log();
     banner();
-    console.log(c(C.dim, "  Mode interaktif · pilih analisis di bawah"));
-    console.log(c(C.gray,
-      "  Config aktif: API=" + (CONFIG.api || DEFAULT_API) +
-      " · paralel=" + CONFIG.concurrency +
-      " · hits=" + CONFIG.hitsFile +
-      " · telegram=" + (CONFIG.telegram.enabled ? "ON" : "OFF") +
-      "  " + c(C.dim, "(ubah di config.json)") + "\n"));
-    const item = (n, title, hint) =>
-      console.log("  " + c(C.cyan + C.bold, n) + c(C.gray, " │ ") +
-        c(C.bold, title.padEnd(26)) + c(C.dim, hint || ""));
-    item("1", "Scan Address",        "semua tx dari 1 wallet, cari R-reuse");
-    item("2", "Analisis TXID",       "1 transaksi via TXID");
-    item("3", "Raw TX hex",          "tempel hex transaksi");
-    item("4", "Signature manual",    "masukkan R, S, Z");
-    item("5", "R-reuse dari JSON",   "file daftar signature");
-    item("6", "Bantuan lengkap",     "tampilkan dokumentasi");
-    item("7", "Hapus cache",         ".btc-cache/");
-    item("8", "Batch scan file",     "daftar address, 1 per baris");
-    item("9", "Scan Explorer",       "scan tx langsung dari mempool/blok terbaru");
-    item("0", "Keluar",              "");
     console.log();
-    const choice = (await ask(c(C.cyan + C.bold, "  " + ICON.arrow + " Pilihan [0-9]: "))).trim();
+
+    // Status bar config
+    const tg = CONFIG.telegram.enabled ? c(C.green, "ON") : c(C.gray, "OFF");
+    const api = (CONFIG.api || DEFAULT_API).replace("https://", "");
+    console.log(c(C.gray, "  ") +
+      c(C.dim, "API ") + c(C.cyan, api) +
+      c(C.gray, "  ·  ") +
+      c(C.dim, "paralel ") + c(C.white, String(CONFIG.concurrency)) +
+      c(C.gray, "  ·  ") +
+      c(C.dim, "Telegram ") + tg +
+      c(C.gray, "  ·  ") +
+      c(C.dim, "cache ") + (CACHE_ENABLED ? c(C.green, "ON") : c(C.gray, "OFF"))
+    );
+    console.log();
+
+    // Fungsi render grup menu
+    const GW = W - 2;
+    const menuTop  = (label) => {
+      const dash = "─".repeat(GW - 4 - visLen(label) - 2);
+      console.log(c(C.gray, "  ┌─ ") + c(C.bold + C.yellow, label) + c(C.gray, " " + dash + "┐"));
+    };
+    const menuBot  = () => console.log(c(C.gray, "  └" + "─".repeat(GW - 2) + "┘"));
+    const menuItem = (n, icon, title, hint) => {
+      const inner = GW - 2;
+      const left  = " " + c(C.yellow + C.bold, n) + "  " + icon + "  " + c(C.bold + C.white, title);
+      const right = c(C.dim, hint);
+      const used  = 1 + visLen(n) + 2 + visLen(icon) + 2 + visLen(title) + visLen(hint);
+      const gap   = Math.max(1, inner - used - 1);
+      console.log(c(C.gray, "  │") + left + " ".repeat(gap) + right + c(C.gray, "│"));
+    };
+
+    menuTop("SCAN ONLINE");
+    menuItem("1", ICON.scan,   "Scan Address",    "Semua tx dari 1 wallet, cari R-reuse");
+    menuItem("2", ICON.search, "Analisis TXID",   "1 transaksi via TXID");
+    menuItem("9", ICON.btc,    "Scan Explorer",   "Langsung dari mempool / blok terbaru");
+    menuItem("8", ICON.file,   "Batch Scan File", "Daftar address, 1 per baris");
+    menuBot();
+
+    console.log();
+    menuTop("ANALISIS MANUAL");
+    menuItem("3", ICON.tool,   "Raw TX Hex",         "Tempel hex raw transaksi");
+    menuItem("4", ICON.tool,   "Signature Manual",   "Masukkan R, S, Z secara manual");
+    menuItem("5", ICON.file,   "R-Reuse dari JSON",  "File daftar signature [{r,s,z}]");
+    menuBot();
+
+    console.log();
+    menuTop("LAINNYA");
+    menuItem("6", ICON.info,  "Bantuan Lengkap", "Tampilkan semua perintah & opsi");
+    menuItem("7", ICON.tool,  "Hapus Cache",     "Bersihkan folder .btc-cache/");
+    menuItem("0", ICON.err,   "Keluar",          "");
+    menuBot();
+
+    console.log();
+    const choice = (await ask(
+      "  " + c(C.yellow + C.bold, ICON.arrow + " Pilihan [0-9]: ")
+    )).trim();
 
     if (choice === "0" || choice === "") { rl.close(); return; }
 
+    const inp = (label) => ask("  " + c(C.gray, "┃ ") + c(C.dim, label + " ") + c(C.yellow, "❯ "));
+
     if (choice === "1") {
-      const addr = (await ask("Address Bitcoin     : ")).trim();
+      const addr = (await inp("Address Bitcoin  ")).trim();
       if (!addr) throw new Error("Address kosong");
       rl.close();
       await analyzeAddress(addr, {
@@ -1910,25 +2000,25 @@ async function interactiveMenu() {
         hitsFile: CONFIG.hitsFile,
       });
     } else if (choice === "2") {
-      const txid = (await ask("TXID                : ")).trim();
+      const txid = (await inp("TXID             ")).trim();
       if (!txid) throw new Error("TXID kosong");
       rl.close();
       await analyzeByTxid(txid, { api: CONFIG.api || DEFAULT_API });
     } else if (choice === "3") {
-      const hex = (await ask("Raw TX hex          : ")).trim();
+      const hex = (await inp("Raw TX hex       ")).trim();
       if (!hex) throw new Error("Hex kosong");
       rl.close();
       await analyzeTx(hex, { amounts: {} });
     } else if (choice === "4") {
-      const r = (await ask("R (hex)             : ")).trim();
-      const s = (await ask("S (hex)             : ")).trim();
-      const z = (await ask("Z / sighash (hex)   : ")).trim();
-      const pub = (await ask("Public key (hex, opsional): ")).trim();
+      const r   = (await inp("R (hex)          ")).trim();
+      const s   = (await inp("S (hex)          ")).trim();
+      const z   = (await inp("Z / sighash (hex)")).trim();
+      const pub = (await inp("Public key (opt) ")).trim();
       rl.close();
       if (!r || !s || !z) throw new Error("R, S, dan Z wajib diisi");
       await analyzeManual([{ r, s, z, pubkey: pub || undefined }]);
     } else if (choice === "5") {
-      const path = (await ask("Path file JSON      : ")).trim();
+      const path = (await inp("Path file JSON   ")).trim();
       rl.close();
       const data = JSON.parse(readFileSync(path, "utf8"));
       if (!Array.isArray(data)) throw new Error("File harus berupa array JSON");
@@ -1940,12 +2030,12 @@ async function interactiveMenu() {
       rl.close();
       if (existsSync(CACHE_DIR)) {
         rmSync(CACHE_DIR, { recursive: true, force: true });
-        console.log(c(C.green, "Cache .btc-cache/ dihapus."));
+        console.log("  " + ICON.ok + " " + c(C.green, "Cache .btc-cache/ berhasil dihapus."));
       } else {
-        console.log("Tidak ada cache untuk dihapus.");
+        console.log("  " + ICON.info + " " + c(C.dim, "Tidak ada cache untuk dihapus."));
       }
     } else if (choice === "8") {
-      const fpath = (await ask("Path file daftar address: ")).trim();
+      const fpath = (await inp("Path file address")).trim();
       rl.close();
       if (!fpath) throw new Error("Path file kosong");
       await batchAddresses(fpath, {
@@ -1955,12 +2045,16 @@ async function interactiveMenu() {
       });
     } else if (choice === "9") {
       console.log();
-      console.log(c(C.dim, "  Sumber data:"));
-      console.log("  " + c(C.cyan + C.bold, "1") + c(C.gray, " │ ") + "Mempool (transaksi belum terkonfirmasi)");
-      console.log("  " + c(C.cyan + C.bold, "2") + c(C.gray, " │ ") + "Blok terbaru (transaksi sudah terkonfirmasi)");
-      const src = (await ask(c(C.cyan + C.bold, "  " + ICON.arrow + " Pilih sumber [1/2, default 1]: "))).trim() || "1";
+      console.log(c(C.gray, "  ┌─ ") + c(C.bold + C.yellow, "SUMBER DATA") + c(C.gray, " ─────────────────────────────────────────────────┐"));
+      console.log(c(C.gray, "  │") + " " + c(C.yellow + C.bold, "1") + "  " + ICON.scan + "  " + c(C.bold + C.white, "Mempool") +
+        c(C.dim, "      Transaksi belum terkonfirmasi (live)") + c(C.gray, "      │"));
+      console.log(c(C.gray, "  │") + " " + c(C.yellow + C.bold, "2") + "  " + ICON.btc  + "  " + c(C.bold + C.white, "Blok Terbaru") +
+        c(C.dim, "  Transaksi sudah dikonfirmasi") + c(C.gray, "           │"));
+      console.log(c(C.gray, "  └" + "─".repeat(W - 4) + "┘"));
+      console.log();
+      const src = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Sumber [1/2, default 1]: "))).trim() || "1";
       const mode = src === "2" ? "blocks" : "mempool";
-      const limitStr = (await ask("  Jumlah maks TX yang di-scan [default 100]: ")).trim();
+      const limitStr = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Maks TX [default 100] : "))).trim();
       const limit = limitStr ? Math.max(1, parseInt(limitStr, 10) || 100) : 100;
       rl.close();
       await scanExplore({
@@ -1972,7 +2066,7 @@ async function interactiveMenu() {
       });
     } else {
       rl.close();
-      console.log(c(C.red, "Pilihan tidak valid."));
+      console.log("  " + ICON.err + " " + c(C.red, "Pilihan tidak valid: " + choice));
     }
   } finally {
     try { rl.close(); } catch {}
