@@ -2,11 +2,11 @@ import { WebSocket } from "ws";
 import { CONFIG, DEFAULT_API } from "../config.js";
 import { padHex, bytesToHex } from "../bytes.js";
 import { hash160, pubkeysFromPriv } from "../hash.js";
-import { c, C, ICON, banner, header, kv, sep, box } from "../ui.js";
+import { c, C, ICON, banner, header, kv, sep, box, statusLine, subItem, cycleBanner, spinner } from "../ui.js";
 import { p2pkhAddress, p2wpkhAddress, toWIF } from "../address.js";
 import { recoverPrivateKey } from "../ecdsa.js";
 import { esploraFetch, sleep, REQ_STATS, reqRatePerSec } from "../net.js";
-import { getPool } from "../endpoints.js";
+import { getPool, compactPoolBadge } from "../endpoints.js";
 import { logScan } from "../log.js";
 import { notifyTelegram } from "../telegram.js";
 import {
@@ -102,12 +102,9 @@ export async function runDaemon(opts = {}) {
   if (PROFILE.enabled) kv("Profile",  "AKTIF (timing per fase)", C.cyan);
   {
     const epPool0 = getPool(base);
-    const epSum0 = epPool0.summary();
-    const epColor = epSum0.active === epSum0.total ? C.green : (epSum0.active > 0 ? C.yellow : C.red);
-    kv("Endpoint",  epSum0.active + "/" + epSum0.total + " aktif (rotasi otomatis)", epColor);
-    for (const ep of epPool0.list()) {
-      kv("  •", ep.url + (ep.url === epPool0.primary ? c(C.dim, "  (primary)") : ""), C.dim);
-    }
+    const { badge, top } = compactPoolBadge(epPool0);
+    kv("Endpoint", badge);
+    if (top) subItem(top);
   }
   kv("Hits file", hitsFile, C.dim);
   console.log();
@@ -171,10 +168,7 @@ export async function runDaemon(opts = {}) {
       continue;
     }
 
-    process.stdout.write(
-      c(C.yellow + C.bold, "  ❯ Siklus #" + cycle) +
-      c(C.dim, "  " + freshTxids.length + " tx baru  ·  pool=" + sigPool.length + " sig  ·  " + new Date().toLocaleTimeString("id-ID")) + "\n"
-    );
+    cycleBanner(cycle, freshTxids.length + " tx baru · pool " + sigPool.length + " sig · " + new Date().toLocaleTimeString("id-ID"));
 
     // --- Ambil metadata + ekstrak sig ---
     const metas = [];
@@ -223,10 +217,13 @@ export async function runDaemon(opts = {}) {
     }
 
     const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
+    const sigRate = (cycleSigs.length / Math.max(parseFloat(elapsed), 0.001)).toFixed(1);
     console.log(
-      "    " + ICON.ok + " " + c(C.green, cycleSigs.length + " sig") +
-      c(C.dim, " dari " + metas.length + " tx  (" + elapsed + "s)") +
-      c(C.dim, "  │  total pool: " + sigPool.length + " sig")
+      "    " + ICON.ok + "  " + c(C.green + C.bold, cycleSigs.length + " sig") +
+      c(C.dim, " dari ") + c(C.cyan, metas.length + " tx") +
+      c(C.dim, " · ") + c(C.magenta, elapsed + "s") +
+      c(C.dim, " (" + sigRate + " sig/dtk)") +
+      c(C.dim, " · pool: ") + c(C.white, sigPool.length + " sig")
     );
 
     // --- Deteksi R-reuse: hanya cek r-keys yang muncul di siklus ini ---
@@ -314,13 +311,18 @@ export async function runDaemon(opts = {}) {
     const rps = reqRatePerSec().toFixed(1);
     const epPool = getPool(base);
     const epSum = epPool.summary();
-    console.log(c(C.gray,
-      "    Total: siklus=" + cycle + "  tx=" + totalTx +
-      "  sig=" + totalSigs + "  hit=" + totalHits +
-      "  pool=" + sigPool.length + "  seen=" + seenTxids.size +
-      "  mem=" + memMB + "MB  req/s=" + rps +
-      "  ep=" + epSum.active + "/" + epSum.total
-    ));
+    const epCol = epSum.active === epSum.total ? C.green : (epSum.active > 0 ? C.yellow : C.red);
+    console.log("    " + statusLine([
+      ["siklus", cycle, C.white],
+      ["tx",     totalTx, C.cyan],
+      ["sig",    totalSigs, C.cyan],
+      ["hit",    totalHits, totalHits > 0 ? C.green + C.bold : C.dim],
+      ["pool",   sigPool.length, C.white],
+      ["seen",   seenTxids.size, C.dim],
+      ["mem",    memMB + "MB", C.dim],
+      ["req/s",  rps, C.magenta],
+      ["ep",     epSum.active + "/" + epSum.total, epCol],
+    ]));
 
     // --- Top-3 R yang paling sering muncul (trending nonce) ---
     {
@@ -344,19 +346,23 @@ export async function runDaemon(opts = {}) {
     if (cycle % SAVE_SEEN_EVERY === 0) saveSeenSnapshot(seenTxids);
 
     if (running) {
-      const wsTag = realtime && wsConnected ? " [ws]" : "";
-      const waitMsg = "  Menunggu " + intervalSec + "s sampai siklus berikutnya…" + wsTag + " (Ctrl+C untuk berhenti)";
-      process.stdout.write(c(C.dim, waitMsg));
       const totalMs = intervalSec * 1000;
       const start = Date.now();
       const kickPromise = new Promise((res) => { wsKick = res; });
+      let frame = 0;
       const tick = async () => {
         while (running) {
           const el = Date.now() - start;
           if (el >= totalMs) return;
           const rem = Math.max(0, Math.ceil((totalMs - el) / 1000));
-          process.stdout.write("\r" + c(C.dim, waitMsg.replace("Menunggu " + intervalSec + "s", "Menunggu " + rem + "s ")) + "\x1b[K");
-          await sleep(Math.min(1000, totalMs - el));
+          const wsTag = realtime && wsConnected ? c(C.green, " [ws]") : "";
+          const line = "    " + c(C.cyan, spinner(frame++)) + " " +
+            c(C.dim, "Menunggu siklus berikutnya · ") +
+            c(C.white + C.bold, rem + "s") +
+            wsTag +
+            c(C.dim, "  (Ctrl+C untuk berhenti)");
+          process.stdout.write("\r" + line + "\x1b[K");
+          await sleep(Math.min(150, totalMs - el));
         }
       };
       await Promise.race([tick(), kickPromise]);

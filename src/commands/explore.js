@@ -1,7 +1,7 @@
 import { CONFIG, DEFAULT_API } from "../config.js";
-import { c, C, header, kv, sep, drawProgress } from "../ui.js";
+import { c, C, ICON, header, kv, sep, drawProgress, subItem } from "../ui.js";
 import { esploraFetch } from "../net.js";
-import { getPool } from "../endpoints.js";
+import { getPool, compactPoolBadge } from "../endpoints.js";
 import {
   processTxAllInputs, runWithConcurrency, detectReuse,
 } from "../analysis.js";
@@ -26,43 +26,42 @@ export async function scanExplore(opts = {}) {
   kv("Paralel", concurrency + " request", C.bold);
   {
     const pool = getPool(base);
-    const sum = pool.summary();
-    const epColor = sum.active === sum.total ? C.green : (sum.active > 0 ? C.yellow : C.red);
-    kv("Endpoint", sum.active + "/" + sum.total + " aktif (rotasi otomatis)", epColor);
-    kv("Primary", base, C.dim);
+    const { badge, top } = compactPoolBadge(pool);
+    kv("Endpoint", badge);
+    if (top) subItem(top);
   }
 
   let txids = [];
 
   if (mode === "mempool") {
-    process.stdout.write(c(C.dim, "Mengambil TXID dari mempool… "));
+    process.stdout.write("  " + ICON.search + " " + c(C.dim, "Mengambil TXID dari mempool… "));
     try {
       const all = await esploraFetch(base, "/mempool/txids");
       txids = Array.isArray(all) ? (unlimited ? all : all.slice(0, limit)) : [];
-      console.log(c(C.green, txids.length + " txid dari mempool"));
+      console.log(c(C.green + C.bold, txids.length) + c(C.dim, " txid dari mempool"));
     } catch (e) {
-      console.log(c(C.red, "Gagal ambil mempool txids: " + e.message));
+      console.log(c(C.red, ICON.err + " Gagal ambil mempool txids: " + e.message));
       return;
     }
   } else {
-    process.stdout.write(c(C.dim, "Mengambil info blok terbaru… "));
+    process.stdout.write("  " + ICON.search + " " + c(C.dim, "Mengambil info blok terbaru… "));
     try {
       const blocks = await esploraFetch(base, "/blocks");
-      console.log(c(C.green, blocks.length + " blok"));
+      console.log(c(C.green + C.bold, blocks.length) + c(C.dim, " blok"));
       for (const blk of blocks) {
         if (txids.length >= limit) break;
-        process.stdout.write(c(C.dim, "  Blok #" + blk.height + " (" + blk.id.slice(0, 12) + "…) → "));
+        process.stdout.write("    " + c(C.gray, "›") + " " + c(C.dim, "Blok #" + blk.height + " (" + blk.id.slice(0, 12) + "…) → "));
         try {
           const tids = await esploraFetch(base, "/block/" + blk.id + "/txids");
           const take = tids.slice(0, limit - txids.length);
           txids.push(...take);
-          console.log(c(C.dim, take.length + " tx"));
+          console.log(c(C.cyan, take.length) + c(C.dim, " tx"));
         } catch (e) {
           console.log(c(C.yellow, "skip: " + e.message));
         }
       }
     } catch (e) {
-      console.log(c(C.red, "Gagal ambil blok: " + e.message));
+      console.log(c(C.red, ICON.err + " Gagal ambil blok: " + e.message));
       return;
     }
   }
@@ -71,7 +70,7 @@ export async function scanExplore(opts = {}) {
     console.log(c(C.yellow, "Tidak ada txid yang ditemukan."));
     return;
   }
-  console.log(c(C.bold, "Total " + txids.length + " TXID akan dianalisis."));
+  console.log("  " + ICON.info + "  " + c(C.bold, "Total ") + c(C.cyan + C.bold, txids.length) + c(C.bold, " TXID akan dianalisis."));
 
   console.log();
   sep("Pipeline · Ambil metadata + ekstrak R/S/Z");
@@ -102,11 +101,13 @@ export async function scanExplore(opts = {}) {
   );
   process.stdout.write("\r\x1b[K");
   const elapsed = ((Date.now() - startTs) / 1000).toFixed(1);
+  const sigRate = (allSigs.length / Math.max(parseFloat(elapsed), 0.001)).toFixed(1);
   console.log(
-    c(C.green, "  Selesai " + elapsed + " dtk — ") +
-    c(C.bold, allSigs.length + " signature") +
-    c(C.gray, " dari " + metaOk + " tx") +
-    (metaErrors.length ? c(C.yellow, "  · " + metaErrors.length + " meta gagal") : "")
+    "  " + ICON.ok + "  " + c(C.green + C.bold, "Selesai " + elapsed + " dtk") +
+    c(C.dim, " — ") + c(C.bold, allSigs.length + " signature") +
+    c(C.dim, " dari ") + c(C.cyan, metaOk + " tx") +
+    c(C.dim, " · " + sigRate + " sig/dtk") +
+    (metaErrors.length ? c(C.yellow, " · " + metaErrors.length + " meta gagal") : "")
   );
   if (errors.length) {
     console.log(c(C.yellow, "  " + errors.length + " error:"));

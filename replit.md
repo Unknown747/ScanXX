@@ -154,6 +154,15 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 15. **runWithConcurrency** cleaner: tidak return wrapper `{sigs,err}` (langsung throw), kode pemanggil lebih ringkas.
 16. **LRUSet.toArray()**: snapshot daemon-seen.json pakai 1 method, bukan iterasi manual.
 
+## UI polish (round-17)
+- **Smooth progress bar**: 8-step Unicode blocks (`▏▎▍▌▋▊▉█`) untuk fill yang halus, gradient warna cyan→yellow→green sesuai progress, separator `│` antara segment (pct, count, rate, ETA, label).
+- **`statusLine([[k,v,col]…])`**: helper multi-segment di `src/ui.js` — daemon footer per siklus jadi `siklus=1 │ tx=5 │ sig=56 │ hit=0 │ pool=56 │ mem=96MB │ req/s=9.4 │ ep=3/3` rapi & berwarna.
+- **`cycleBanner(n, sub)`**: header siklus daemon dengan chevron + dash leader → ` ❯ Siklus #N ────  5 tx baru · pool 56 sig · 20.49.34`.
+- **`compactPoolBadge(pool)`** (di `src/endpoints.js`): satu baris `3/3 endpoint · strategi: latency` + sub-bullet top-3 host (e.g. `mempool.space 245ms · blockstream.info 312ms · …`) — gantikan dump 6 URL berbaris.
+- **Spinner Braille (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`)** untuk countdown daemon: `⠦ Menunggu siklus berikutnya · 12s [ws]`.
+- **`subItem(text, color)`**: indented bullet `›` konsisten dengan `kv()` col-2.
+- Konsistensi: semua raw `console.log("Daftar tx :", …)` di `address.js` & `explore.js` dikonversi ke `kv()` / `statusLine()` / `subItem()`.
+
 ## Roadmap
 - Dukungan Taproot (BIP-341)
 - Cek saldo segwit `bc1q...` di daemon hit

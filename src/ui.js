@@ -140,7 +140,35 @@ export const ICON = {
   search: useColor ? "\x1b[36m⌕\x1b[0m"  : "[?]",
   file:   useColor ? "\x1b[35m◈\x1b[0m"  : "[F]",
   tool:   useColor ? "\x1b[90m◆\x1b[0m"  : "[T]",
+  bolt:   useColor ? "\x1b[33m⚡\x1b[0m" : "[!]",
+  dot:    useColor ? "\x1b[90m·\x1b[0m"  : ".",
+  bullet: useColor ? "\x1b[90m›\x1b[0m"  : ">",
+  pipe:   useColor ? "\x1b[90m│\x1b[0m"  : "|",
 };
+
+// Spinner (Braille) untuk status berjalan
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+export function spinner(i) { return SPINNER_FRAMES[i % SPINNER_FRAMES.length]; }
+
+// Multi-segment status line: [["label","value",color], ...]
+export function statusLine(segments) {
+  const sep = c(C.gray, " " + (useColor ? "│" : "|") + " ");
+  return segments.map(([k, v, col]) =>
+    c(C.dim, k + "=") + c(col || C.white, String(v))
+  ).join(sep);
+}
+
+// Sub-bullet item yang konsisten dgn kv()
+export function subItem(text, color) {
+  console.log("  " + c(C.gray, (useColor ? "›" : ">") + " ") + (color ? c(color, text) : text));
+}
+
+// Pretty cycle/section banner dengan chevron
+export function cycleBanner(n, summary, color) {
+  const tag = c((color || C.yellow) + C.bold, " ❯ Siklus #" + n + " ");
+  const dash = c(C.gray, "─".repeat(Math.max(2, W - visLen(tag) - visLen(summary || "") - 4)));
+  console.log("  " + tag + dash + (summary ? "  " + c(C.dim, summary) : ""));
+}
 
 export function banner() {
   if (!useColor) {
@@ -172,14 +200,29 @@ export function banner() {
   console.log(c(G, "╚" + "═".repeat(I) + "╝"));
 }
 
+// Smooth 8-step block progress bar
+const BAR_BLOCKS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
+function smoothBar(pct, w) {
+  const eighths = Math.max(0, Math.min(w * 8, Math.round(pct * w * 8)));
+  const full = Math.floor(eighths / 8);
+  const rem  = eighths - full * 8;
+  let s = "█".repeat(full);
+  if (rem > 0 && full < w) s += BAR_BLOCKS[rem];
+  const empty = w - full - (rem > 0 && full < w ? 1 : 0);
+  return s + "░".repeat(empty);
+}
+
 export function drawProgress(done, total, startTs, label = "") {
-  const w = 30;
+  const w = 28;
   const pct = total ? done / total : 0;
-  const filled = Math.round(pct * w);
-  const head = filled > 0 ? c(C.green + C.bold, "█") : "";
-  const body = filled > 1 ? c(C.cyan, "█".repeat(filled - 1)) : "";
-  const tail = c(C.gray, "░".repeat(w - filled));
-  const bar = head + body + tail;
+  const barRaw = smoothBar(pct, w);
+  // Split bar agar bisa kasih warna gradient (filled vs empty)
+  const fillCount = barRaw.split("░")[0].length;
+  const filled = barRaw.slice(0, fillCount);
+  const empty  = barRaw.slice(fillCount);
+  const fillColor = pct < 0.33 ? C.cyan : pct < 0.75 ? C.yellow : C.green;
+  const bar = c(C.gray, "▕") + c(fillColor + C.bold, filled) + c(C.gray, empty) + c(C.gray, "▏");
+
   const elapsed = (Date.now() - startTs) / 1000;
   const rate = done / Math.max(elapsed, 0.001);
   const eta = rate > 0 ? Math.max(0, (total - done) / rate) : 0;
@@ -188,13 +231,14 @@ export function drawProgress(done, total, startTs, label = "") {
     const m = Math.floor(s / 60), sec = Math.floor(s % 60);
     return m + "m" + String(sec).padStart(2, "0") + "s";
   };
+  const sep = c(C.gray, " " + (useColor ? "│" : "|") + " ");
   const line =
     "\r" + bar + " " +
-    c(C.bold, (pct * 100).toFixed(1).padStart(5) + "%") +
-    c(C.gray, "  " + done + "/" + total) +
-    c(C.gray, "  " + rate.toFixed(1) + "/dtk") +
-    c(C.gray, "  ETA " + fmt(eta)) +
-    (label ? c(C.dim, "  " + label) : "") +
+    c(C.bold + C.white, (pct * 100).toFixed(1).padStart(5) + "%") + sep +
+    c(C.cyan, done + "/" + total) + sep +
+    c(C.magenta, rate.toFixed(1) + "/dtk") + sep +
+    c(C.dim, "ETA " + fmt(eta)) +
+    (label ? sep + c(C.dim, label) : "") +
     "\x1b[K";
   process.stdout.write(line);
 }

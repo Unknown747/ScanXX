@@ -250,6 +250,22 @@ export function setStrategyOverride(s) {
   resetPool();
 }
 
+// Compact one-line summary untuk header scan/daemon
+export function compactPoolBadge(pool) {
+  const sum = pool.summary();
+  const ranked = pool.ranked().filter((e) => Date.now() >= e.cooldownUntil);
+  const top = ranked.slice(0, 3).map((e) => {
+    const host = e.url.replace(/^https?:\/\//, "").replace(/\/api$/, "");
+    const lat = (e.latencyMs != null && isFinite(e.latencyMs)) ? " " + e.latencyMs + "ms" : "";
+    return c(C.cyan, host) + c(C.dim, lat);
+  }).join(c(C.gray, " · "));
+  const more = ranked.length > 3 ? c(C.dim, "  +" + (ranked.length - 3) + " mirror") : "";
+  const epColor = sum.active === sum.total ? C.green : (sum.active > 0 ? C.yellow : C.red);
+  const badge = c(epColor + C.bold, sum.active + "/" + sum.total) + c(C.dim, " endpoint")
+              + c(C.gray, " · strategi: ") + c(C.magenta, pool.strategy);
+  return { badge, top: top + more };
+}
+
 function fmtLatency(ep) {
   if (ep.latencyMs == null) return c(C.dim, "  -    ");
   if (!isFinite(ep.latencyMs)) return c(C.red, " down ");

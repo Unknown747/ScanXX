@@ -2,7 +2,7 @@ import { writeFileSync, readFileSync } from "node:fs";
 import { CONFIG, DEFAULT_API, CACHE_ENABLED } from "../config.js";
 import { logScan } from "../log.js";
 import { padHex } from "../bytes.js";
-import { c, C, header, kv, sep, drawProgress } from "../ui.js";
+import { c, C, ICON, header, kv, sep, drawProgress, statusLine, subItem } from "../ui.js";
 import {
   CACHE_STATS, resetCacheStats,
   loadAddressListCache, saveAddressListCache,
@@ -12,7 +12,7 @@ import {
   fetchAllTxsForAddress, processTxForAddress,
   runWithConcurrency, detectReuse,
 } from "../analysis.js";
-import { getPool } from "../endpoints.js";
+import { getPool, compactPoolBadge } from "../endpoints.js";
 
 export async function analyzeAddress(address, opts) {
   if (!opts) opts = {};
@@ -23,10 +23,9 @@ export async function analyzeAddress(address, opts) {
   logScan("SCAN", "mulai scan address=" + address + " concurrency=" + concurrency);
   {
     const pool = getPool(base);
-    const sum = pool.summary();
-    const epColor = sum.active === sum.total ? C.green : (sum.active > 0 ? C.yellow : C.red);
-    kv("Endpoint", sum.active + "/" + sum.total + " aktif (rotasi otomatis)", epColor);
-    kv("Primary", base, C.dim);
+    const { badge, top } = compactPoolBadge(pool);
+    kv("Endpoint", badge);
+    if (top) subItem(top);
   }
   kv("Paralel", concurrency + " request", C.bold);
   kv("Cache", CACHE_ENABLED ? "AKTIF (.btc-cache/)" : "NONAKTIF",
@@ -39,13 +38,13 @@ export async function analyzeAddress(address, opts) {
   if (useCachedList) {
     CACHE_STATS.listHits++;
     const ageMin = ((Date.now() - cached.ts) / 60000).toFixed(1);
-    console.log("Daftar tx  :", c(C.cyan, "DARI CACHE (umur " + ageMin + " menit, " + cached.txs.length + " tx)"));
+    kv("Daftar tx", c(C.cyan, "DARI CACHE") + c(C.dim, "  umur " + ageMin + " menit · " + cached.txs.length + " tx"));
     txs = cached.txs;
   } else {
     CACHE_STATS.listMisses++;
-    process.stdout.write("Mengambil daftar transaksi\u2026 ");
+    process.stdout.write("  " + ICON.search + " " + c(C.dim, "Mengambil daftar transaksi… "));
     txs = await fetchAllTxsForAddress(base, address);
-    console.log(c(C.green, txs.length + " tx"));
+    console.log(c(C.green + C.bold, txs.length + " tx"));
     saveAddressListCache(address, txs);
   }
 
@@ -101,20 +100,24 @@ export async function analyzeAddress(address, opts) {
   process.stdout.write("\r\x1b[K");
   saveResume(address, processedSet, allSigs);
   const elapsed = ((Date.now() - startTs) / 1000).toFixed(1);
+  const sigRate = (allSigs.length / Math.max(parseFloat(elapsed), 0.001)).toFixed(1);
   console.log(
-    c(C.green, "Selesai dalam " + elapsed + " dtk \u2014 ") +
-    c(C.bold, allSigs.length + " signature") +
-    " dari " + txs.length + " tx" +
-    (remainingTxs.length < txs.length ? c(C.dim, " (" + (txs.length - remainingTxs.length) + " dilewati via resume)") : "")
+    "  " + ICON.ok + "  " + c(C.green + C.bold, "Selesai " + elapsed + " dtk") +
+    c(C.dim, " — ") + c(C.bold, allSigs.length + " signature") +
+    c(C.dim, " dari ") + c(C.cyan, txs.length + " tx") +
+    c(C.dim, " · " + sigRate + " sig/dtk") +
+    (remainingTxs.length < txs.length ? c(C.dim, " · " + (txs.length - remainingTxs.length) + " dilewati via resume") : "")
   );
   logScan("SCAN", "selesai address=" + address + " durasi=" + elapsed + "s sigs=" + allSigs.length + " tx=" + txs.length + " errors=" + errors.length);
   clearResume(address);
   if (CACHE_ENABLED) {
     const total = CACHE_STATS.hexHits + CACHE_STATS.hexMisses;
     const pct = total ? ((CACHE_STATS.hexHits / total) * 100).toFixed(1) : "0";
-    console.log(c(C.dim,
-      "Cache tx hex: " + CACHE_STATS.hexHits + " hit, " + CACHE_STATS.hexMisses +
-      " miss (" + pct + "% hit-rate)"));
+    console.log("  " + statusLine([
+      ["cache hit", CACHE_STATS.hexHits, C.green],
+      ["miss", CACHE_STATS.hexMisses, C.yellow],
+      ["hit-rate", pct + "%", C.cyan],
+    ]));
   }
   if (errors.length) {
     console.log(c(C.yellow, errors.length + " error saat ambil/parse:"));
@@ -166,10 +169,9 @@ export async function batchAddresses(filePath, opts = {}) {
   {
     const baseB = opts.api || DEFAULT_API;
     const pool = getPool(baseB);
-    const sum = pool.summary();
-    const epColor = sum.active === sum.total ? C.green : (sum.active > 0 ? C.yellow : C.red);
-    kv("Endpoint", sum.active + "/" + sum.total + " aktif (rotasi otomatis)", epColor);
-    kv("Primary", baseB, C.dim);
+    const { badge, top } = compactPoolBadge(pool);
+    kv("Endpoint", badge);
+    if (top) subItem(top);
   }
   kv("Paralel", (opts.concurrency || CONFIG.concurrency) + " request");
 
