@@ -95,10 +95,12 @@ export async function esploraFetch(base, path) {
       await rateLimitWait(url);
       _bumpReq();
       profStart("http");
+      const t0 = Date.now();
       const r = await fetchWithTimeout(url, { headers: { "user-agent": "btc-sig-analyzer/1.0" } });
+      const latency = Date.now() - t0;
       profEnd("http");
       if (r.ok) {
-        pool.markOk(ep, r.status);
+        pool.markOk(ep, r.status, latency);
         const ct = r.headers.get("content-type") || "";
         return ct.includes("json") ? await r.json() : await r.text();
       }

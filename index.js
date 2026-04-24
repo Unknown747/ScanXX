@@ -12,12 +12,12 @@ import { scanExplore } from "./src/commands/explore.js";
 import { runDaemon } from "./src/commands/daemon.js";
 import { showStats } from "./src/commands/stats.js";
 import { showEndpoints } from "./src/commands/endpoints.js";
-import { setExtraEndpoints } from "./src/endpoints.js";
+import { setExtraEndpoints, setStrategyOverride } from "./src/endpoints.js";
 
 const rawArgv = process.argv.slice(2);
 const FLAG_KEYS_WITH_VALUE = new Set([
   "api", "out", "hits", "concurrency", "amount",
-  "mode", "limit", "date", "interval", "endpoints", "watch",
+  "mode", "limit", "date", "interval", "endpoints", "watch", "strategy",
 ]);
 const posArgs = [];
 for (let i = 0; i < rawArgv.length; i++) {
@@ -43,6 +43,8 @@ async function main() {
     const list = epFlag.split(",").map((s) => s.trim()).filter(Boolean);
     if (list.length > 0) setExtraEndpoints(list);
   }
+  const stratFlag = getOpt("strategy");
+  if (stratFlag) setStrategyOverride(stratFlag);
   if (cmd === "clear-cache") {
     if (existsSync(CACHE_DIR)) {
       rmSync(CACHE_DIR, { recursive: true, force: true });

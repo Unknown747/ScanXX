@@ -11,6 +11,16 @@
   ],
   "endpointDefaults": true,
 
+  "endpointStrategy": "latency",
+
+  "latencyProbe": {
+    "enabled": true,
+    "intervalMs": 300000,
+    "timeoutMs": 5000
+  },
+
+  "latencyBucketMs": 100,
+
   "cooldown": {
     "baseMs": 5000,
     "maxMs": 300000

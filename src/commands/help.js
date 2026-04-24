@@ -48,6 +48,7 @@ export function help() {
   sect("OPSI GLOBAL");
   flag("--api <url>",         "Endpoint Esplora utama (default: mempool.space)");
   flag("--endpoints \"u1,u2\"", "Tambah endpoint mirror (rotasi otomatis + failover)");
+  flag("--strategy <s>",      "Pilih strategi pool: latency | round-robin | primary");
   flag("--concurrency <n>",   "Request paralel saat scan address (default: 8)");
   flag("--hits <file.txt>",   "File simpan hit R-reuse (default: hits.txt)");
   flag("--out <file.json>",   "Simpan hasil scan ke JSON");

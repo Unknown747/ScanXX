@@ -22,7 +22,7 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
   - `address.js` — `base58Encode`, `bech32Encode`, `p2pkhAddress`, `p2wpkhAddress`, `p2shP2wpkhAddress`, `toWIF`
   - `ecdsa.js` — `recoverPrivateKey(r,s1,z1,s2,z2)`
   - `net.js` — undici Agent global, `esploraFetch` (multi-endpoint rotation + failover), `fetchWithTimeout`, `rateLimitWait`, `REQ_STATS`, `reqRatePerSec`, `RETRY`, `sleep`
-  - `endpoints.js` — `EndpointPool` (rotation, cooldown exponential per-endpoint, health stats), `getPool(primary)` singleton, `setExtraEndpoints(list)`, `printPoolReport(pool)`. Default mirrors: mempool.space, blockstream.info, mempool.emzy.de
+  - `endpoints.js` — `EndpointPool` (rotation, cooldown exponential per-endpoint, health stats, latency tracking + background probe). Strategi: `latency` (default, auto-rank tercepat dengan bucket 100ms + RR dalam grup), `round-robin`, `primary`. `getPool(primary)` singleton, `setExtraEndpoints(list)`, `setStrategyOverride(s)`, `printPoolReport(pool)`. Default mirrors: mempool.space, blockstream.info, mempool.emzy.de. Latency diukur otomatis dari real request (EWMA 70/30) + background probe tiap 5 menit.
   - `telegram.js` — `notifyTelegram(text)`
   - `price.js` — `fetchBtcUsdPrice`, `formatBTC`, `formatUSD`, `fetchAddressBalance`
   - `cache.js` — `LRUSet` (+`toArray()`), `LRUMap`, `CACHE_DIR`, `SEEN_FILE`, daily NDJSON shards dengan **lazy load** (`fetchTxHexCached`, `pruneOldCache`, `_listShards`, `_loadShard`, legacy `.hex` migration+delete), `RECENT_SHARDS` window, address-list cache, resume state, watchlist, `appendHit` **WriteStream** + `closeAllHitsStreams`, `CACHE_STATS`
