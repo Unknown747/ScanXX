@@ -122,11 +122,14 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - **scanExplore single-pipeline**: fetch metadata + ekstrak R/S/Z digabung dalam 1 jalur konkuren (sebelumnya 2 fase serial bikin idle time besar)
 - **Daemon block-mode parallel**: fetch txid list per blok pakai `runWithConcurrency` (sebelumnya serial per blok), urutan tetap dijaga
 
-## Konfigurasi
-- `config.json` (opsional): `api`, `concurrency`, `hitsFile`,
+## Konfigurasi (semua dari config.json — menu hanya tanya minimum)
+- `config.json` (opsional, ada default kalau tidak ada): `api`, `concurrency`, `hitsFile`,
   `cache.{enabled, listMaxAgeHours, txMaxAgeHours, pruneOnStart, txIndexCap}`,
-  `daemon.{realtime, seenLimit, poolMaxAgeHours, rateLimit, watchFile}`,
+  `explore.{mode, limit}`,
+  `daemon.{mode, interval, limit, realtime, watchFile, seenLimit, poolMaxAgeHours, rateLimit}`,
   `telegram.{enabled, botToken, chatId, notifyOnLiveOnly}`.
+- **`limit: 0` artinya unlimited** (tidak ada batas tx) — ini default sekarang untuk explore & daemon.
+- Menu interaktif: pilihan #4 (explore) dan #5 (daemon) sekarang **hanya tanya sumber (mempool/blok)**, sisanya otomatis dari config.json — langsung start scan.
 - File watchlist: 1 address per baris, baris kosong & `# komentar` diabaikan.
 - Telegram `notifyTelegram()` dipanggil saat ada hit R-reuse.
 

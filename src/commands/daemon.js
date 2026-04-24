@@ -20,7 +20,10 @@ import {
 export async function runDaemon(opts = {}) {
   const base        = opts.api || DEFAULT_API;
   const mode        = opts.mode || "mempool";
-  const limitPerCycle = Math.max(1, opts.limit || 200);
+  const rawLimit = (opts.limit !== undefined) ? opts.limit : (CONFIG.daemon && CONFIG.daemon.limit !== undefined ? CONFIG.daemon.limit : 0);
+  const unlimited = !rawLimit || rawLimit <= 0;
+  const limitPerCycle = unlimited ? Infinity : Math.max(1, rawLimit);
+  const limitLabel = unlimited ? "tanpa batas" : (limitPerCycle + " tx per siklus");
   const intervalSec = Math.max(10, opts.interval || 60);
   const hitsFile    = opts.hitsFile || CONFIG.hitsFile;
   const concurrency = opts.concurrency || CONFIG.concurrency;
@@ -91,7 +94,7 @@ export async function runDaemon(opts = {}) {
   );
   kv("Sumber",    mode === "mempool" ? "Mempool (unconfirmed)" : "Blok terbaru", C.cyan);
   kv("Interval",  intervalSec + " detik per siklus", C.white);
-  kv("Maks TX",   limitPerCycle + " tx per siklus", C.white);
+  kv("Maks TX",   limitLabel, C.white);
   kv("Paralel",   concurrency + " request", C.dim);
   kv("Realtime",  realtime ? "WebSocket aktif (mempool.space)" : "Polling biasa", realtime ? C.green : C.dim);
   if (watchlist) kv("Watchlist", opts.watchFile + " (" + watchlist.size + " address)", C.bold + C.yellow);

@@ -14,8 +14,16 @@ const DEFAULT_CONFIG = {
     txMaxAgeHours: 48,
     pruneOnStart: true,
   },
+  explore: {
+    mode: "mempool",
+    limit: 0,
+  },
   daemon: {
-    realtime: false,
+    mode: "mempool",
+    interval: 60,
+    limit: 0,
+    realtime: true,
+    watchFile: null,
     seenLimit: 200_000,
     poolMaxAgeHours: 24,
     rateLimit: 0,
@@ -31,6 +39,7 @@ function loadConfig() {
       ...DEFAULT_CONFIG,
       ...raw,
       cache: { ...DEFAULT_CONFIG.cache, ...(raw.cache || {}) },
+      explore: { ...DEFAULT_CONFIG.explore, ...(raw.explore || {}) },
       daemon: { ...DEFAULT_CONFIG.daemon, ...(raw.daemon || {}) },
       telegram: { ...DEFAULT_CONFIG.telegram, ...(raw.telegram || {}) },
     };

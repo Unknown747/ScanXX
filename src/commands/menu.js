@@ -141,17 +141,16 @@ export async function interactiveMenu() {
         c(C.dim, "  Transaksi sudah dikonfirmasi") + c(C.gray, "           │"));
       console.log(c(C.gray, "  └" + "─".repeat(W - 4) + "┘"));
       console.log();
-      const src = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Sumber [1/2, default 1]: "))).trim() || "1";
+      const cfgMode = (CONFIG.explore && CONFIG.explore.mode) || "mempool";
+      const defSrc = cfgMode === "blocks" ? "2" : "1";
+      const src = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Sumber [1/2, default " + defSrc + "]: "))).trim() || defSrc;
       const mode = src === "2" ? "blocks" : "mempool";
-      const limitStr = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Maks TX [default 100] : "))).trim();
-      const limit = limitStr ? Math.max(1, parseInt(limitStr, 10) || 100) : 100;
       rl.close();
       await scanExplore({
         api: CONFIG.api || DEFAULT_API,
         concurrency: CONFIG.concurrency,
         hitsFile: CONFIG.hitsFile,
         mode,
-        limit,
       });
     } else if (choice === "5") {
       console.log();
@@ -162,25 +161,17 @@ export async function interactiveMenu() {
         c(C.dim, "  Confirmed txs") + c(C.gray, "                              │"));
       console.log(c(C.gray, "  └" + "─".repeat(W - 4) + "┘"));
       console.log();
-      const dsrc = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Sumber [1/2, default 1]       : "))).trim() || "1";
+      const cfgDmode = (CONFIG.daemon && CONFIG.daemon.mode) || "mempool";
+      const defDsrc  = cfgDmode === "blocks" ? "2" : "1";
+      const dsrc = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Sumber [1/2, default " + defDsrc + "]: "))).trim() || defDsrc;
       const dmode = dsrc === "2" ? "blocks" : "mempool";
-      const dIntervalStr = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Interval detik [default 60]   : "))).trim();
-      const dLimitStr    = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Maks TX/siklus [default 200]  : "))).trim();
-      const dRtStr       = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Realtime WebSocket? [y/N]     : "))).trim().toLowerCase();
-      const dWatch       = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " File watchlist [opsional]     : "))).trim();
-      const dInterval = dIntervalStr ? Math.max(10, parseInt(dIntervalStr, 10) || 60) : 60;
-      const dLimit    = dLimitStr    ? Math.max(1,  parseInt(dLimitStr,    10) || 200) : 200;
-      const dRealtime = dRtStr === "y" || dRtStr === "ya" || dRtStr === "yes";
       rl.close();
       await runDaemon({
         api:         CONFIG.api || DEFAULT_API,
         concurrency: CONFIG.concurrency,
         hitsFile:    CONFIG.hitsFile,
         mode:        dmode,
-        interval:    dInterval,
-        limit:       dLimit,
-        realtime:    dRealtime,
-        watchFile:   dWatch || (CONFIG.daemon && CONFIG.daemon.watchFile) || null,
+        watchFile:   (CONFIG.daemon && CONFIG.daemon.watchFile) || null,
       });
     } else {
       rl.close();

@@ -7,18 +7,21 @@ import {
 
 export async function scanExplore(opts = {}) {
   const base = opts.api || DEFAULT_API;
-  const mode = opts.mode || "mempool";
-  const limit = opts.limit || 100;
+  const mode = opts.mode || (CONFIG.explore && CONFIG.explore.mode) || "mempool";
+  const rawLimit = (opts.limit !== undefined) ? opts.limit : ((CONFIG.explore && CONFIG.explore.limit) || 0);
+  const unlimited = !rawLimit || rawLimit <= 0;
+  const limit = unlimited ? Infinity : rawLimit;
+  const limitLabel = unlimited ? "tanpa batas" : String(rawLimit);
   const concurrency = opts.concurrency || CONFIG.concurrency;
 
   console.log();
   header(
     "Scan Explorer",
     (mode === "mempool" ? "Mempool live" : "Blok terbaru") +
-    " · max " + limit + " tx · " + base
+    " · " + limitLabel + " tx · " + base
   );
   kv("Mode", mode === "mempool" ? "Mempool (unconfirmed)" : "Blok terbaru", C.cyan);
-  kv("Maks TX", limit, C.bold);
+  kv("Maks TX", limitLabel, C.bold);
   kv("Paralel", concurrency + " request", C.bold);
   kv("API", base, C.dim);
 
@@ -28,7 +31,7 @@ export async function scanExplore(opts = {}) {
     process.stdout.write(c(C.dim, "Mengambil TXID dari mempool… "));
     try {
       const all = await esploraFetch(base, "/mempool/txids");
-      txids = Array.isArray(all) ? all.slice(0, limit) : [];
+      txids = Array.isArray(all) ? (unlimited ? all : all.slice(0, limit)) : [];
       console.log(c(C.green, txids.length + " txid dari mempool"));
     } catch (e) {
       console.log(c(C.red, "Gagal ambil mempool txids: " + e.message));

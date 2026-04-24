@@ -102,28 +102,33 @@ async function main() {
       concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
     });
   } else if (cmd === "explore") {
-    const mode = getOpt("mode") || "mempool";
-    const limitVal = getOpt("limit");
+    const cfgEx     = CONFIG.explore || {};
+    const modeRaw   = getOpt("mode") || cfgEx.mode || "mempool";
+    const limitVal  = getOpt("limit");
+    const limitNum  = limitVal != null ? parseInt(limitVal, 10) : (cfgEx.limit != null ? cfgEx.limit : 0);
     await scanExplore({
       api: getOpt("api") || CONFIG.api,
-      mode: (mode === "blocks" || mode === "blok") ? "blocks" : "mempool",
-      limit: limitVal ? Math.max(1, parseInt(limitVal, 10)) : 100,
+      mode: (modeRaw === "blocks" || modeRaw === "blok") ? "blocks" : "mempool",
+      limit: limitNum,
       hitsFile: getOpt("hits") || CONFIG.hitsFile,
       concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
     });
   } else if (cmd === "daemon") {
-    const mode = getOpt("mode") || "mempool";
-    const intervalVal = getOpt("interval");
-    const limitVal    = getOpt("limit");
+    const cfgD       = CONFIG.daemon || {};
+    const modeRaw    = getOpt("mode") || cfgD.mode || "mempool";
+    const intervalVal= getOpt("interval");
+    const limitVal   = getOpt("limit");
+    const intervalN  = intervalVal != null ? Math.max(5, parseInt(intervalVal, 10)) : (cfgD.interval || 60);
+    const limitN     = limitVal != null ? parseInt(limitVal, 10) : (cfgD.limit != null ? cfgD.limit : 0);
     await runDaemon({
       api:         getOpt("api") || CONFIG.api,
-      mode:        (mode === "blocks" || mode === "blok") ? "blocks" : "mempool",
-      interval:    intervalVal ? Math.max(10, parseInt(intervalVal, 10)) : 60,
-      limit:       limitVal    ? Math.max(1,  parseInt(limitVal, 10))    : 200,
+      mode:        (modeRaw === "blocks" || modeRaw === "blok") ? "blocks" : "mempool",
+      interval:    intervalN,
+      limit:       limitN,
       hitsFile:    getOpt("hits") || CONFIG.hitsFile,
       concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
-      realtime:    hasFlag("realtime") ? true : (CONFIG.daemon && CONFIG.daemon.realtime),
-      watchFile:   getOpt("watch") || (CONFIG.daemon && CONFIG.daemon.watchFile) || null,
+      realtime:    hasFlag("realtime") ? true : !!cfgD.realtime,
+      watchFile:   getOpt("watch") || cfgD.watchFile || null,
     });
   } else {
     console.error(c(C.red, "Perintah tidak dikenal: " + cmd));
