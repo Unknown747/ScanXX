@@ -1,0 +1,51 @@
+{
+  "api": "https://mempool.space/api",
+
+  "endpoints": [
+    "https://mempool.space/api",
+    "https://blockstream.info/api",
+    "https://mempool.emzy.de/api"
+  ],
+  "endpointDefaults": true,
+
+  "cooldown": {
+    "baseMs": 5000,
+    "maxMs": 300000
+  },
+
+  "concurrency": 8,
+
+  "hitsFile": "hits.txt",
+  "logFile": "scan.log",
+  "logEnabled": true,
+
+  "cache": {
+    "enabled": true,
+    "listMaxAgeHours": 6,
+    "txMaxAgeHours": 48,
+    "pruneOnStart": true
+  },
+
+  "explore": {
+    "mode": "mempool",
+    "limit": 0
+  },
+
+  "daemon": {
+    "mode": "mempool",
+    "interval": 60,
+    "limit": 0,
+    "realtime": true,
+    "watchFile": null,
+    "seenLimit": 200000,
+    "poolMaxAgeHours": 24,
+    "rateLimit": 0
+  },
+
+  "telegram": {
+    "enabled": false,
+    "botToken": "",
+    "chatId": "",
+    "notifyOnLiveOnly": true
+  }
+}
