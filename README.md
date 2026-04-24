@@ -1,281 +1,364 @@
 # btc-sig-analyzer
 
-CLI Node.js (ESM) untuk membedah tanda tangan ECDSA pada transaksi Bitcoin. Mengekstrak komponen `R`, `S`, `Z`, public key, dan pubkey hash dari setiap input transaksi — lalu otomatis mendeteksi **R-reuse** (nonce dipakai ulang) dan memulihkan **private key** beserta alamat-alamatnya.
+CLI Node.js (ESM) untuk membedah tanda tangan ECDSA pada transaksi Bitcoin.
+Mengekstrak komponen `R`, `S`, `Z`, public key, dan pubkey hash dari setiap input
+transaksi — lalu otomatis mendeteksi **R-reuse** (nonce yang dipakai ulang) dan
+memulihkan **private key** beserta semua alamatnya (P2PKH / P2WPKH / P2SH-P2WPKH).
 
-Antarmuka sepenuhnya **Bahasa Indonesia**, tanpa framework web, tanpa server. Cukup `node index.js`.
+Antarmuka sepenuhnya **Bahasa Indonesia**. Tidak ada server, tidak ada framework
+web, tidak butuh node Bitcoin lokal. Cukup `node index.js`.
 
----
-
-## Fitur
-
-- Ekstraksi `R / S / Z` dari berbagai jenis input:
-  - Legacy P2PKH
-  - SegWit v0 (P2WPKH, P2SH-P2WPKH) dengan sighash BIP-143
-- Deteksi **R-reuse** lintas input/transaksi/address
-- Pemulihan private key otomatis bila menemukan R-reuse:
-  - `k = (z1 − z2) / (s1 − s2)  mod n`
-  - `d = (s1·k − z1) / r        mod n`
-- Verifikasi pemulihan dengan mencocokkan public key
-- Derivasi alamat (compressed & uncompressed) + WIF mainnet:
-  - P2PKH (`1...`), P2WPKH (`bc1q...`), P2SH-P2WPKH (`3...`)
-- Cek saldo otomatis tiap alamat hasil pemulihan via mempool.space
-- Notifikasi opsional via Telegram (fire-and-forget)
-- Mode **daemon** loop berkelanjutan + opsi **realtime** WebSocket mempool.space
-- **Watchlist** alamat khusus (alert merah ekstra saat ke-hit)
-- Cache lokal di `.btc-cache/` (NDJSON shard harian + auto-prune)
-- Scan address paralel dengan progress bar (`--concurrency`)
-- Mode interaktif (menu) jika dijalankan tanpa argumen
+```
+==========================================================================
+ BTC-SIG-ANALYZER  —  Bitcoin ECDSA Signature Analyzer & Key Recovery
+==========================================================================
+```
 
 ---
 
-## Stack
+## Daftar Isi
 
-- Node.js >= 18 (ESM, `"type": "module"`)
+1. [Fitur Utama](#fitur-utama)
+2. [Stack & Dependensi](#stack--dependensi)
+3. [Instalasi](#instalasi)
+4. [Quick Start](#quick-start)
+5. [Mode Interaktif (Menu)](#mode-interaktif-menu)
+6. [Daftar Perintah CLI](#daftar-perintah-cli)
+7. [config.json — Referensi Lengkap](#configjson--referensi-lengkap)
+8. [Daemon: Polling, Realtime & Top-R Trending](#daemon-polling-realtime--top-r-trending)
+9. [Output File](#output-file)
+10. [Optimasi yang Diterapkan](#optimasi-yang-diterapkan)
+11. [Troubleshooting](#troubleshooting)
+12. [Disclaimer](#disclaimer)
+13. [Lisensi](#lisensi)
+
+---
+
+## Fitur Utama
+
+- **Ekstraksi `R / S / Z`** dari berbagai jenis input:
+  - Legacy P2PKH (sighash legacy)
+  - SegWit v0 — P2WPKH & P2SH-P2WPKH (sighash BIP-143)
+- **Deteksi R-reuse** lintas input, transaksi, address, dan siklus daemon.
+- **Pemulihan private key otomatis** saat R-reuse ditemukan:
+  - `k = (z1 − z2) / (s1 − s2) mod n`
+  - `d = (s1·k − z1) / r mod n`
+- Verifikasi pemulihan dengan mencocokkan public key (single scalar mult).
+- Derivasi semua alamat (compressed & uncompressed) + WIF mainnet untuk tiap key.
+- Cek saldo otomatis tiap alamat hasil pemulihan via mempool.space.
+- Notifikasi opsional ke **Telegram** (fire-and-forget, tidak memblokir scan).
+- **Mode daemon** loop berkelanjutan dengan dua sumber:
+  - Polling interval (default tiap 60 dtk)
+  - **Realtime** WebSocket `wss://mempool.space/api/v1/ws` + endpoint
+    `/mempool/recent` sebagai fallback.
+- Watchlist alamat khusus (alert merah ekstra saat ke-hit).
+- **Top-R Trending** — daemon menampilkan 3 nilai R yang paling sering
+  muncul di pool (count ≥ 2). Disorot jika count ≥ 3.
+- Cache lokal di `.btc-cache/` (NDJSON shard harian, lazy-load, auto-prune).
+- Scan address paralel dengan progress bar (`--concurrency`).
+- Mode interaktif (menu) jika dijalankan tanpa argumen — hanya menanyakan
+  satu hal (sumber data); selebihnya dibaca dari `config.json`.
+
+---
+
+## Stack & Dependensi
+
+- Node.js **>= 18** (ESM, `"type": "module"`)
 - [`@noble/curves`](https://www.npmjs.com/package/@noble/curves) — secp256k1
 - [`@noble/hashes`](https://www.npmjs.com/package/@noble/hashes) — SHA-256, RIPEMD-160
-- [`undici`](https://www.npmjs.com/package/undici) — HTTP/1.1 keep-alive Agent untuk fetch
+- [`undici`](https://www.npmjs.com/package/undici) — HTTP/1.1 keep-alive Agent
 - [`ws`](https://www.npmjs.com/package/ws) — WebSocket client (mode realtime daemon)
+
+Tidak ada dependency lain. Tidak ada native binary.
 
 ---
 
 ## Instalasi
 
 ```bash
-# Node.js >= 18
+git clone https://github.com/<user>/btc-sig-analyzer.git
+cd btc-sig-analyzer
 npm install
-# atau
-pnpm install
+```
+
+Salin & sunting konfigurasi default:
+
+```bash
+cp config.example.json config.json   # bila belum ada
+$EDITOR config.json
+```
+
+> `config.json` masuk `.gitignore` (boleh berisi token Telegram pribadi).
+
+Cek instalasi:
+
+```bash
+node index.js help
 ```
 
 ---
 
-## Cara Pakai
+## Quick Start
 
-### Mode interaktif (paling mudah)
+Yang paling cepat: jalankan **mode interaktif**:
 
 ```bash
 node index.js
 ```
 
-Pilih dari menu:
+Menu hanya menanyakan satu hal: sumber data (mempool, blocks, atau watchlist
+file). Sisanya — interval, limit, realtime, output file — diambil dari
+`config.json`.
 
-```
-1) Scan Address
-2) Analisis TXID
-3) Batch Scan File
-4) Scan Explorer (mempool/blocks)
-5) Daemon Auto-Scan (loop berkelanjutan)
-6) Raw TX Hex
-7) Signature Manual (R/S/Z)
-8) R-Reuse dari JSON
-9) Bantuan Lengkap
-C) Hapus Cache
-0) Keluar
-```
-
-### Mode perintah langsung
+Beberapa contoh perintah satu baris:
 
 ```bash
-# Analisis 1 transaksi via TXID (online, fetch dari mempool.space)
-node index.js txid <txid>
+# Analisis 1 transaksi via TXID
+node index.js txid f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16
 
-# Scan SELURUH transaksi dari sebuah address
-node index.js address 1XPTgDRhN8RFnzniWCddobD9iKZatrvH4 --concurrency 8
+# Scan seluruh history sebuah address
+node index.js address bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq --concurrency 8
 
-# Batch scan banyak address dari file (1 address per baris)
-node index.js batch ./addresses.txt
+# Scan banyak address dari file
+node index.js batch addresses.txt
 
-# Analisis raw transaksi (hex) langsung
-node index.js tx <hex>
-node index.js tx-file ./tx.hex --amount 0=12345 --amount 1=67890
+# Scan mempool tanpa batas (bisa 50.000+ tx)
+node index.js explore --mode mempool
 
-# Analisis satu signature manual
-node index.js sig --r <rhex> --s <shex> --z <zhex> [--pub <pubkeyhex>]
+# Daemon realtime (Ctrl-C untuk berhenti)
+node index.js daemon --realtime
 
-# Cek R-reuse dari kumpulan signature dalam file JSON
-node index.js reuse ./sigs.json
-# Format: [{ "r": "...", "s": "...", "z": "...", "pubkey": "..." }, ...]
-
-# Scan tx langsung dari explorer (mempool atau blok terbaru)
-node index.js explore --mode mempool --limit 100
-node index.js explore --mode blocks  --limit 50
-
-# Daemon — loop otomatis + alert R-reuse
-node index.js daemon --mode mempool --interval 60 --limit 200
-node index.js daemon --mode mempool --realtime          # WebSocket kick
-node index.js daemon --watch ./watchlist.txt            # alert ekstra
+# Cek 1 signature manual (hex)
+node index.js sig --r aaaa1234 --s bbbb5678 --z cccc9abc
 
 # Statistik dari scan.log
-node index.js stats
-node index.js stats ./scan.log --date 2026-04-24
+node index.js stats --date 2026-04-24
 ```
-
-### Opsi global
-
-| Opsi               | Keterangan                                                              |
-| ------------------ | ----------------------------------------------------------------------- |
-| `--api <url>`      | Endpoint Esplora kustom. Default: `https://mempool.space/api`           |
-| `--concurrency n`  | Jumlah request paralel saat scan address (default `8`)                  |
-| `--out <file>`     | Simpan ringkasan hasil scan ke file JSON                                |
-| `--hits <file>`    | Lokasi file hit R-reuse (default `hits.txt`)                            |
-| `--verbose`        | Tampilkan tiap R/S/Z selama scan address                                |
-| `--no-cache`       | Nonaktifkan cache lokal                                                 |
-| `--amount i=sats`  | Nilai input ke-i untuk transaksi SegWit (boleh berkali-kali)            |
-| `--limit n`        | Jumlah tx per siklus (`explore` / `daemon`)                             |
-| `--mode m`         | `mempool` atau `blocks` (`explore` / `daemon`)                          |
-| `--interval dtk`   | Jeda antar siklus daemon (default 60)                                   |
-| `--realtime`       | Daemon: aktifkan WebSocket kick dari mempool.space                      |
-| `--watch <file>`   | Daemon: file watchlist address (1 per baris, `#` = komentar)            |
-| `--profile`        | Tampilkan timing per fase di akhir run                                  |
-
-Perintah utilitas:
-
-- `node index.js clear-cache` — hapus seluruh isi `.btc-cache/`
-- `node index.js help` — bantuan lengkap
-
-> **Catatan:** Endpoint default `mempool.space`. Untuk testnet pakai
-> `--api https://mempool.space/testnet/api`. `blockstream.info` kadang
-> memblokir IP cloud — gunakan mempool.space jika dapat error 403.
 
 ---
 
-## Konfigurasi (`config.json`)
+## Mode Interaktif (Menu)
 
-Opsional. Letakkan di root project:
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  1) Analisis 1 transaksi (TXID atau raw hex)                         │
+│  2) Scan satu alamat (full history)                                  │
+│  3) Scan banyak alamat dari file (batch)                             │
+│  4) Explore mempool / blok terbaru          ← hanya tanya sumber     │
+│  5) Daemon scan otomatis (loop / realtime)  ← hanya tanya sumber     │
+│  6) Lihat statistik scan.log                                         │
+│  0) Keluar                                                           │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
-```json
+Pilihan #4 dan #5 sengaja **dibuat minimal**: cukup pilih sumber
+(`mempool` / `blocks` / file watchlist), parameter lain (limit, interval,
+realtime on/off, output file) dibaca otomatis dari section `explore` /
+`daemon` di `config.json`. Untuk override sekali jalan, gunakan flag CLI.
+
+---
+
+## Daftar Perintah CLI
+
+| Perintah | Keterangan |
+|---|---|
+| `node index.js` | Mode interaktif (menu) |
+| `node index.js help` | Bantuan lengkap |
+| `node index.js txid <txid>` | Ambil & analisis 1 transaksi via TXID |
+| `node index.js tx <hex>` | Analisis raw hex transaksi |
+| `node index.js tx-file <path>` | Sama, tapi raw hex dibaca dari file |
+| `node index.js sig --r --s --z [--pub]` | Analisis 1 signature manual |
+| `node index.js reuse <file.json>` | R-reuse dari `[{r,s,z,pubkey?}]` |
+| `node index.js address <addr>` | Scan semua tx wallet, deteksi R-reuse |
+| `node index.js batch <file>` | Scan banyak address dari file (1 per baris, `#` = komentar) |
+| `node index.js explore` | Scan tx langsung dari explorer (`--mode mempool\|blocks`, `--limit n`) |
+| `node index.js daemon` | Scan otomatis loop (`--mode`, `--interval`, `--limit`, `--realtime`, `--watch <file>`) |
+| `node index.js stats [logfile]` | Ringkasan scan.log (`--date YYYY-MM-DD`) |
+| `node index.js clear-cache` | Hapus seluruh isi folder `.btc-cache/` |
+
+### Opsi global
+
+| Flag | Fungsi |
+|---|---|
+| `--api <url>` | Endpoint Esplora kustom (default `https://mempool.space/api`) |
+| `--concurrency <n>` | Request paralel saat scan address (default 8) |
+| `--hits <file.txt>` | File simpan hit R-reuse (default `hits.txt`) |
+| `--out <file.json>` | Simpan hasil scan ke JSON |
+| `--verbose` | Tampilkan tiap R/S/Z saat scan address |
+| `--no-cache` | Nonaktifkan cache lokal |
+| `--amount <i>=<sat>` | Nilai input ke-i dalam satoshi (untuk SegWit raw) |
+| `--profile` | Tampilkan timing per fase di akhir run |
+
+---
+
+## config.json — Referensi Lengkap
+
+```jsonc
 {
-  "telegram": {
-    "enabled": false,
-    "botToken": "",
-    "chatId": ""
+  "api": "https://mempool.space/api",
+  "concurrency": 8,
+  "hitsFile": "hits.txt",
+  "logFile":  "scan.log",
+  "logEnabled": true,
+
+  "cache": {
+    "enabled": true,
+    "listMaxAgeHours": 6,    // umur cache list tx per address
+    "txMaxAgeHours":   48,   // umur cache hex per tx
+    "pruneOnStart": true     // bersih-bersih file kadaluarsa di startup
   },
+
+  "explore": {
+    "mode":  "mempool",      // "mempool" | "blocks"
+    "limit": 0               // 0 = tanpa batas (scan SEMUA tx mempool)
+  },
+
   "daemon": {
-    "seenLimit": 200000,
-    "poolMaxAgeHours": 24
+    "mode":      "mempool",  // "mempool" | "blocks" | "watchlist"
+    "interval":  60,         // detik antar siklus polling
+    "limit":     0,          // 0 = tanpa batas per siklus
+    "realtime":  true,       // sambungkan WebSocket mempool.space
+    "watchFile": null,       // path file watchlist (null = tidak dipakai)
+    "seenLimit":      200000,// LRU dedup tx (mencegah re-scan)
+    "poolMaxAgeHours": 24,   // umur signature di pool R-reuse
+    "rateLimit":       0     // 0 = tanpa rate-limit; n = max n req/dtk
+  },
+
+  "telegram": {
+    "enabled":       false,
+    "botToken":      "",
+    "chatId":        "",
+    "notifyOnLiveOnly": true   // hanya alert untuk signature live (bukan replay cache)
   }
 }
 ```
 
-- **Telegram**: aktifkan `telegram.enabled = true` agar setiap hit dikirim ke chat. Notifikasi bersifat fire-and-forget (`.catch(() => {})`) sehingga loop daemon tidak ke-block bila Telegram lambat/timeout.
-- **Daemon**: `seenLimit` = kapasitas LRU `seenTxids` (memory-bounded). `poolMaxAgeHours` = TTL signature pool (evict by waktu).
+> `limit: 0` ⇒ **tanpa batas** (Infinity). Pada label terlihat sebagai
+> `"tanpa batas"`.
+
+---
+
+## Daemon: Polling, Realtime & Top-R Trending
+
+### Polling
+
+```bash
+node index.js daemon --mode mempool --interval 30 --limit 200
+```
+
+Setiap 30 detik, ambil maks 200 tx baru dari mempool, ekstrak signature,
+masukkan ke pool R-reuse global. Output per siklus:
+
+```
+❯ Siklus #12  187 tx baru  ·  pool=1542 sig  ·  19.30.45
+  Total: siklus=12  tx=2104  sig=1542  hit=0  pool=1542  seen=2104  mem=112MB  req/s=6.2
+  Top R: 8a2f… ×3  ·  3b91… ×2  ·  c0ee… ×2
+```
+
+Baris `Top R` muncul otomatis bila ada R yang berulang ≥ 2x di pool aktif.
+Yang count-nya ≥ 3 disorot kuning **bold**. Baris ini hilang sendiri saat
+tidak ada repeat.
+
+### Realtime
+
+```bash
+node index.js daemon --realtime
+```
+
+Membuka WebSocket ke `wss://mempool.space/api/v1/ws`, subscribe channel
+`mempool-blocks` & track tx baru. Sebagai jaring pengaman, endpoint
+`/mempool/recent` di-poll juga (interval pendek) untuk menangkap tx yang
+terlewat saat WS reconnect.
+
+### Watchlist
+
+```bash
+node index.js daemon --watch addresses.txt
+```
+
+Format file: 1 address per baris, `#` = komentar. Setiap signature dari
+address di file ini ditampilkan dengan label `[WATCH]` merah, terlepas dari
+ada R-reuse atau tidak.
 
 ---
 
 ## Output File
 
-Saat R-reuse terdeteksi & private key berhasil dipulihkan:
+| File | Isi | Catatan |
+|---|---|---|
+| `hits.txt` | Ringkasan R-reuse + private key (manusia-baca) | Append-only |
+| `hits.jsonl` | Sama, format JSONL (1 hit per baris) | Untuk scripting |
+| `hits_LIVE.txt` | Khusus hit dari mempool live (bukan replay cache) | Append-only |
+| `scan.log` | Log per siklus daemon (CSV-style) | Dipakai `stats` |
+| `.btc-cache/` | Cache list tx per address + hex per tx (NDJSON shard harian) | Auto-prune |
 
-- **`hits.txt`** — laporan ramah-baca:
-  ```
-  ── HIT ──────────────────────────────────────
-  TXID-A    : ...
-  TXID-B    : ...
-  R (reuse) : ...
-  PrivKey   : <hex>
-  WIF (cmp) : K...
-  WIF (unc) : 5...
-  Address   : 1AbC... (compressed)
-              1XyZ... (uncompressed)
-  Saldo     : 0.00012345 BTC
-  ─────────────────────────────────────────────
-  ```
-- **`hits_LIVE.txt`** — hanya alamat dengan saldo > 0
-- **`hits_CROSS.txt`** — hit lintas-transaksi (R-reuse antar tx berbeda)
-- **`scan.log`** — log scan harian (dikonsumsi `node index.js stats`)
+Semua file di atas sudah masuk `.gitignore`.
 
 ---
 
-## Cache
+## Optimasi yang Diterapkan
 
-Untuk menghemat request ke API publik:
+Ringkasan teknis (16 perubahan utama dari versi awal):
 
-- `.btc-cache/tx-daily/tx-YYYY-MM-DD.ndjson` — shard harian hex tx (TTL 48 jam, auto-prune saat startup)
-- `.btc-cache/addr/<addr>.json` — daftar tx per-address (TTL 6 jam)
-- `.btc-cache/daemon-seen.json` — snapshot `seenTxids` daemon (TTL 48 jam, atomic write via `.tmp` + rename) — restart daemon tidak re-scan ribuan tx
-
-Statistik cache (hit/miss + persentase) ditampilkan di akhir scan address. Gunakan `--no-cache` untuk menonaktifkannya, atau `node index.js clear-cache` untuk membersihkan.
-
-HTTP fetch memakai undici Agent global dengan keep-alive (pool 32 koneksi per origin) untuk mengurangi overhead handshake.
-
----
-
-## Daemon (loop bounded + persistent)
-
-Mode `daemon` mengulang siklus tiap N detik:
-
-- Ambil txids baru dari mempool atau blok terbaru
-- `seenTxids` = LRU set (cap dari `daemon.seenLimit`) — memory-bounded, di-snapshot ke `.btc-cache/daemon-seen.json` tiap 5 siklus & saat exit
-- `sigPool` di-evict by waktu (`daemon.poolMaxAgeHours`)
-- **Realtime** (`--realtime`): WebSocket `wss://mempool.space/api/v1/ws` — pesan WS "kick" memotong sleep agar siklus jalan segera
-- **Watchlist** (`--watch`): hit yang menyentuh address watchlist mendapat alert merah ekstra + tag `[WATCHLIST!]` di Telegram
-- Append hits via `WriteStream` (non-blocking)
-- Status bar tiap siklus: `siklus / tx / sig / hit / pool / seen / mem MB / req/s`
-- `Ctrl+C` berhenti graceful (cleanup WS + stream + simpan snapshot)
+1. Single scalar multiplication via `pubkeysFromPriv` — derivasi semua
+   alamat dari satu key tanpa multi-mult berulang.
+2. `rIndex` Map incremental di daemon — O(1) lookup R-reuse, hindari
+   rebuild full scan tiap siklus.
+3. Lazy-load shard cache — hanya load file shard tanggal saat diperlukan.
+4. `appendHit` streaming — `fs.createWriteStream` reused, tidak `open`/`close`
+   tiap hit.
+5. Dedup LRU `seen` set di daemon (`seenLimit` configurable).
+6. Concurrency adaptif untuk fetch tx hex (default 8, override `--concurrency`).
+7. Prefetch pipeline (fetch hex tx N+1 saat parsing tx N).
+8. Profile mode (`--profile`) untuk timing per fase.
+9. Resume per-address (state disimpan, scan bisa lanjut).
+10. Cache list address dengan TTL (default 6 jam).
+11. Cache hex tx dengan TTL (default 48 jam).
+12. Auto-prune cache di startup.
+13. `detectReuse` null-pubkey safe (tidak crash bila pubkey tidak terbaca).
+14. Menu streamlining — pilihan #4 & #5 hanya tanya sumber.
+15. Default `limit: 0 = unlimited` di explore & daemon.
+16. **Top-R trending line** di daemon (count ≥ 2, top-3 sorted, bold ≥ 3).
 
 ---
 
-## Cara Kerja Singkat
+## Troubleshooting
 
-ECDSA pada secp256k1 menghasilkan `(r, s)` dari pesan `z` dan kunci privat `d`:
+**“Tidak ada signature+pubkey yang dapat dibaca otomatis pada input ini”**
+Input bukan P2PKH/P2WPKH/P2SH-P2WPKH (mungkin P2PK murni, P2TR, multisig
+non-standard, atau coinbase). Ini wajar.
 
-```
-k          = nonce acak per signature
-r          = (k·G).x  mod n
-s          = k⁻¹·(z + r·d)  mod n
-```
+**Permintaan API gagal / timeout**
+Pakai `--api` untuk endpoint Esplora alternatif. Kurangi `--concurrency`
+bila terkena rate-limit. Atau set `daemon.rateLimit` ke nilai > 0.
 
-Bila satu kunci memakai `k` yang **sama** untuk dua signature `(r, s1, z1)` & `(r, s2, z2)`:
+**Memori naik saat daemon jalan lama**
+Turunkan `daemon.poolMaxAgeHours` (default 24 jam) atau `seenLimit`.
+Cache file otomatis di-prune sesuai `cache.txMaxAgeHours`.
 
-```
-k = (z1 − z2) / (s1 − s2)  mod n
-d = (s1·k − z1) / r        mod n
-```
+**Hits.txt tidak muncul**
+File baru dibuat saat ada hit pertama. Untuk uji coba, gunakan:
 
-Tool ini mencari pasangan `r` yang sama lintas semua input yang diekstrak, lalu memverifikasi `d` dengan mencocokkan public key turunannya.
-
----
-
-## Struktur Proyek
-
-```
-.
-├── index.js                  # entry tipis (~150 baris): parsing argv, dispatch
-├── package.json              # type: module, bin: btc-sig
-├── README.md
-├── replit.md
-├── src/                      # modul library inti
-│   ├── config.js             # load config.json, CACHE_ENABLED live binding
-│   ├── log.js                # logScan() ke scan.log
-│   ├── bytes.js              # hex/bytes helpers, varint, LE encoders
-│   ├── hash.js               # secp256k1, sha256d, hash160
-│   ├── ui.js                 # palette, banner, header, kv, sep, box, progress
-│   ├── profile.js            # timing per fase (--profile)
-│   ├── tx.js                 # parseDER, parseScriptPushes, parseTx
-│   ├── sighash.js            # legacySighash, BIP143 context & sighash
-│   ├── address.js            # base58, bech32, P2PKH/P2WPKH/P2SH-P2WPKH, WIF
-│   ├── ecdsa.js              # recoverPrivateKey(r, s1, z1, s2, z2)
-│   ├── net.js                # undici Agent, esploraFetch, rate limit, retry
-│   ├── telegram.js           # notifyTelegram(text)
-│   ├── price.js              # BTC/USD, format BTC/USD, balance address
-│   ├── cache.js              # LRU set/map, daily NDJSON cache, watchlist, hits stream
-│   ├── analysis.js           # detectReuse, processTx*, runWithConcurrency
-│   └── commands/             # handler per sub-command
-│       ├── analyze.js        # analyzeTx, analyzeManual, analyzeByTxid
-│       ├── address.js        # analyzeAddress, batchAddresses
-│       ├── explore.js        # scanExplore (single-pipeline)
-│       ├── daemon.js         # runDaemon (loop + WS)
-│       ├── stats.js          # showStats (parse scan.log)
-│       ├── help.js           # banner bantuan
-│       └── menu.js           # interactiveMenu()
-└── .btc-cache/               # dibuat saat runtime (di-gitignore)
-    ├── tx-daily/
-    ├── addr/
-    └── daemon-seen.json
+```bash
+# generate sample R-reuse yang valid
+node -e "..."   # lihat docs/test-fixtures.md (opsional)
+node index.js reuse sample-reuse.json
 ```
 
 ---
 
 ## Disclaimer
 
-Tool edukasional untuk riset kriptografi & forensik blockchain. Hanya gunakan pada data publik atau aset yang **Anda miliki sendiri**. Mengakses dompet milik orang lain melanggar hukum di banyak yurisdiksi.
+Tool ini dibuat untuk **riset, edukasi, dan audit forensik**. Pemulihan
+private key hanya berhasil bila signer benar-benar memakai ulang nonce —
+yang merupakan bug implementasi, bukan kelemahan ECDSA itu sendiri.
+
+**Jangan** menggunakan tool ini untuk mencuri dana orang lain. Repository
+ini tidak menyediakan dan tidak mendukung penggunaan jahat. Penulis tidak
+bertanggung jawab atas penyalahgunaan.
+
+---
+
+## Lisensi
+
+MIT.

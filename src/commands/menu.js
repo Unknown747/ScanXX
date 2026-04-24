@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
 import { CONFIG, DEFAULT_API, CACHE_ENABLED } from "../config.js";
 import { c, C, ICON, W, banner, visLen } from "../ui.js";
 import { CACHE_DIR } from "../cache.js";
@@ -11,7 +10,7 @@ import { runDaemon } from "./daemon.js";
 import { help } from "./help.js";
 
 export async function interactiveMenu() {
-  const rl = createInterface({ input, output });
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
   const ask = (q) => rl.question(q);
   try {
     console.log();
