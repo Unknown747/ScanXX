@@ -59,15 +59,18 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - C: Hapus Cache
 - 0: Keluar
 
-## Daemon (runDaemon) — bounded state
+## Daemon (runDaemon) — bounded state + persistent
 - Loop tiap N detik (default 60), ambil txids baru dari mempool atau blok terbaru
 - `seenTxids` = LRUSet (cap `daemon.seenLimit`, default 200k) — memory-bounded
+- **Persisted seenTxids**: snapshot ke `.btc-cache/daemon-seen.json` tiap 5 siklus & saat exit (atomic write via `.tmp` + rename). Restore saat startup kalau snapshot < 48 jam → restart daemon tidak re-scan ribuan tx yang sudah dilihat.
 - `sigPool` di-evict by waktu (cutoff `daemon.poolMaxAgeHours`, default 24 jam)
 - Realtime opsional via WebSocket `wss://mempool.space/api/v1/ws` — pesan WS "kick" memotong sleep agar siklus jalan segera
+- **Address watchlist** (`--watch <file>`): file daftar address (1/baris, `#` = komentar). Hit yang nyentuh address watchlist dapat alert merah ekstra + tag `[WATCHLIST!]` di Telegram.
+- **Telegram fire-and-forget**: notify pakai `.catch(() => {})` tanpa await — daemon loop tidak ke-block kalau Telegram lambat/timeout.
 - Append hits via `WriteStream` (tidak block event loop seperti `appendFileSync`)
-- Alert di terminal + simpan ke hits file + Telegram jika R-reuse ditemukan
-- Countdown timer antar siklus, Ctrl+C untuk berhenti gracefully (cleanup WS + stream)
-- Ringkasan akhir: total siklus, tx, sig, hit
+- Status bar tiap siklus: `siklus / tx / sig / hit / pool / seen / mem MB / req/s`
+- Countdown timer antar siklus, Ctrl+C untuk berhenti gracefully (cleanup WS + stream + save snapshot)
+- Ringkasan akhir: total siklus/tx/sig/hit/req + lokasi snapshot
 
 ## Cache (daily NDJSON shards)
 - Cache hex tx disimpan di `.btc-cache/tx-daily/tx-YYYY-MM-DD.ndjson`
@@ -82,15 +85,20 @@ CLI Node.js (ESM) untuk ekstraksi `R/S/Z` dari transaksi Bitcoin & pemulihan pri
 - Retry dengan jitter + `Retry-After` header (anti-429)
 - Daily NDJSON cache: 1 file/hari menggantikan ribuan file kecil (jauh lebih cepat di filesystem CoW)
 - Bounded daemon state (LRU seenTxids, time-window sigPool) — daemon bisa jalan berhari-hari tanpa OOM
+- Persisted seenTxids snapshot — restart daemon tidak re-scan
+- Telegram fire-and-forget — notify tidak nge-block daemon loop
 - WebSocket realtime mempool.space (opsional, fallback otomatis ke polling)
 - Auto terminal width detection
 - `detectReuse` O(n) via Map grouping per R (inner pair-loop hanya per group)
+- Resume scan address (state file per address di `.btc-cache/`) — Ctrl+C lalu lanjut tanpa kehilangan progress
+- `--profile` flag: tampilkan timing per fase di akhir run (label `http`, dll)
 
 ## Konfigurasi
 - `config.json` (opsional): `api`, `concurrency`, `hitsFile`,
   `cache.{enabled, listMaxAgeHours, txMaxAgeHours, pruneOnStart}`,
-  `daemon.{realtime, seenLimit, poolMaxAgeHours, rateLimit}`,
+  `daemon.{realtime, seenLimit, poolMaxAgeHours, rateLimit, watchFile}`,
   `telegram.{enabled, botToken, chatId, notifyOnLiveOnly}`.
+- File watchlist: 1 address per baris, baris kosong & `# komentar` diabaikan.
 - Telegram `notifyTelegram()` dipanggil saat ada hit R-reuse.
 
 ## Roadmap

